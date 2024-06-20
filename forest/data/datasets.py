@@ -568,8 +568,7 @@ class FaceDetector:
         for idx, (img, _, image_id) in enumerate(self.dataset):
             landmarks = self.get_landmarks(img)
             
-            if len(landmarks) == 0:
-                print('Faulty image: ', idx)
+            if len(landmarks) == 0 or self.args.random_placement:
                 if self.args.constrain_perturbation:
                     self.dataset_face_overlay[idx] = torch.ones((224, 224))
                 

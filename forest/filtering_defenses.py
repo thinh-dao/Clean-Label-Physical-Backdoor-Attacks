@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-import defense.cleansers.robust_estimation as robust_estimation
+from .robust_estimation import BeingRobust
 import random
 from .data.datasets import PoisonDataset, normalize
 from tqdm import tqdm
@@ -300,7 +300,7 @@ def SPECTRE(U, temp_feats, n_dim, budget, oracle_clean_feats=None):
     temp_feats = torch.matmul(projector, temp_feats)
 
     if oracle_clean_feats is None:
-        estimator = robust_estimation.BeingRobust(random_state=0, keep_filtered=True).fit((temp_feats.T).cpu().numpy())
+        estimator = BeingRobust(random_state=0, keep_filtered=True).fit((temp_feats.T).cpu().numpy())
         clean_mean = torch.FloatTensor(estimator.location_).cuda()
         filtered_feats = (torch.FloatTensor(estimator.filtered_).cuda() - clean_mean).T
         clean_covariance = torch.cov(filtered_feats)

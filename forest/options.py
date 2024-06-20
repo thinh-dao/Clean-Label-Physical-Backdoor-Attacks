@@ -210,4 +210,7 @@ def options():
 
     parser.add_argument("--to_file", type=bool, default=True)
     parser.add_argument("--n_times_test", type=int, default=1)
+
+    # BLC setting
+    parser.add_argument("--random_placement", action='store_true')
     return parser

@@ -129,7 +129,7 @@ class _VictimBase:
             
         write('Starting clean training with {} scenario ...'.format(self.args.scenario), self.args.output)
         
-        if self.args.recipe == 'label-consistent':
+        if self.args.recipe == 'label-consistent' and 'resnet' in self.args.net:
             save_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_robust.pth")
         else:
             save_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
