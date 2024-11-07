@@ -9,13 +9,13 @@ import time
 import forest
 
 from forest.filtering_defenses import get_defense
+from forest.firewall_defenses import get_firewall
 from forest.utils import write, set_random_seed
 from forest.consts import BENCHMARK, NUM_CLASSES
 torch.backends.cudnn.benchmark = BENCHMARK
 
 # Parse input arguments
 args = forest.options().parse_args()
-args.dataset = os.path.join('datasets', args.dataset)
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   # see issue #152
 os.environ["CUDA_VISIBLE_DEVICES"]=args.devices
@@ -45,6 +45,7 @@ if __name__ == "__main__":
     
     setup = forest.utils.system_startup(args) # Set up device and torch data type
     
+    num_classes = len(os.listdir(os.path.join("datasets", args.dataset, 'train')))
     model = forest.Victim(args, num_classes=NUM_CLASSES, setup=setup) # Initialize model and loss_fn
     data = forest.Kettle(args, model.defs.batch_size, model.defs.augmentations,
                          model.defs.mixing_method, setup=setup) # Set up trainloader, validloader, poisonloader, poison_ids, trainset/poisonset/source_testset
@@ -59,11 +60,6 @@ if __name__ == "__main__":
     train_time = time.time()
     print("Train time: ", str(datetime.timedelta(seconds=train_time - start_time)))
     
-    if args.recipe != 'naive' and witch.args.backdoor_finetuning:
-        witch.backdoor_finetuning(model, data, lr=0.000005, num_epoch=25)
-        if witch.args.load_feature_repr:
-            model.save_feature_representation()
-                
     # Select poisons based on maximum gradient norm
     data.select_poisons(model)
     
@@ -125,8 +121,15 @@ if __name__ == "__main__":
         model.load_feature_representation()
     
     defense_time = time.time()
-    print("Defense time: ", str(datetime.timedelta(seconds=defense_time - test_time)))
+    print("Training Defense time: ", str(datetime.timedelta(seconds=defense_time - test_time)))
     
+    # Set up post-training defenses (firewalls)
+    firewalls = args.firewall.lower().split(',')
+    if args.firewall:
+        for firewall in firewalls:
+            firewall = get_firewall(firewall)
+            firewall(data, model, poison_delta, args)
+            
     write('\n' + datetime.datetime.now().strftime("%A, %d. %B %Y %I:%M%p"), args.output)
     write('---------------------------------------------------', args.output)
     write(f'Finished computations with train time: {str(datetime.timedelta(seconds=train_time - start_time))}', args.output)

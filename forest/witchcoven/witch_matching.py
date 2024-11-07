@@ -2,11 +2,11 @@
 
 import torch
 from ..consts import BENCHMARK, NON_BLOCKING, NORMALIZE
-from ..utils import bypass_last_layer, cw_loss, total_variation_loss, upwind_tv, upwind_tv_channel
+from ..utils import bypass_last_layer, cw_loss, total_variation_loss, upwind_tv
 from ..victims.training import _split_data
 torch.backends.cudnn.benchmark = BENCHMARK
 from .witch_base import _Witch
-from forest.data.datasets import normalize
+from forest.data.datasets import normalization
 
 class WitchGradientMatching(_Witch):
     """Brew passenger poison with given arguments.
@@ -30,40 +30,9 @@ class WitchGradientMatching(_Witch):
             poison_grad = torch.autograd.grad(poison_loss, differentiable_params, retain_graph=True, create_graph=True)
 
             passenger_loss = self._passenger_loss(poison_grad, source_grad, source_clean_grad, source_gnorm)
-            visual_loss = 1/197.5331 * torch.mean(torch.linalg.matrix_norm(perturbations).pow(2))
+            regularized_loss = self.get_regularized_loss(perturbations, inputs, tau)
             
-            if self.args.visreg == 'l1':
-                attacker_loss = passenger_loss + torch.mean(torch.abs(perturbations))
-            elif self.args.visreg == 'l2':
-                attacker_loss = passenger_loss + self.args.vis_weight * visual_loss
-            elif self.args.visreg == 'TV':
-                attacker_loss = passenger_loss + upwind_tv(perturbations)
-            elif self.args.visreg == 'TV_channel':
-                attacker_loss = passenger_loss + upwind_tv_channel(perturbations)
-            elif self.args.visreg == 'TV+l1':
-                attacker_loss = passenger_loss + torch.mean(torch.abs(perturbations)) + total_variation_loss(perturbations)
-            elif self.args.visreg == 'TV+l2':
-                attacker_loss = passenger_loss + self.args.vis_weight * (visual_loss + total_variation_loss(perturbations))
-            elif self.args.visreg == 'TV+soft':
-                relative_mask = 1.0 - inputs
-                relative_L_soft = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean()
-                attacker_loss = passenger_loss + self.args.vis_weight * (relative_L_soft + upwind_tv(perturbations))
-            elif self.args.visreg == 'soft':
-                relative_mask = 1.0 - inputs
-                relative_L_soft = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean()
-                attacker_loss = passenger_loss + relative_L_soft
-            elif self.args.visreg == 'soft_new':
-                if NORMALIZE:
-                    normalized_inputs = normalize(inputs)
-                    max_vals_per_channel = torch.amax(normalized_inputs.abs(), dim=(1))
-                    relative_mask = normalized_inputs.abs() / max_vals_per_channel[:, None, :, :]
-                else:
-                    max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
-                    relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
-                relative_L_soft = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean()
-                attacker_loss = passenger_loss + relative_L_soft
-            else:
-                attacker_loss = passenger_loss
+            attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
             
             if self.args.featreg != 0:
                 if self.target_feature == None: raise ValueError('No target feature found')
@@ -128,7 +97,39 @@ class WitchGradientMatching(_Witch):
                 passenger_loss += 0.5 * poison_grad[i].pow(2).sum() / source_gnorm
 
         return passenger_loss
-    
+
+    def get_regularized_loss(self, perturbations, inputs, tau):
+        if self.args.visreg == 'l1':
+            regularized_loss = torch.mean(torch.abs(perturbations))
+        elif self.args.visreg == 'l2':
+            regularized_loss = torch.mean(torch.linalg.matrix_norm(perturbations).pow(2))
+        elif self.args.visreg == 'UTV':
+            regularized_loss = upwind_tv(perturbations)
+        elif self.args.visreg == 'TV+l1':
+            regularized_loss = torch.mean(torch.abs(perturbations)) + 5 * total_variation_loss(perturbations)
+        elif self.args.visreg == 'TV+l2':
+            regularized_loss = torch.mean(torch.linalg.matrix_norm(perturbations).pow(2)) + 5 * total_variation_loss(perturbations)
+        elif self.args.visreg == 'soft_l2':
+            max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
+            relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
+            regularized_loss = torch.mean(torch.linalg.matrix_norm(perturbations - tau).pow(2))
+        elif self.args.visreg == 'soft_l_inf':
+            max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
+            relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
+            regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean()
+        elif self.args.visreg == 'TV+soft_l_inf':
+            max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
+            relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
+            regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean() + 5 * total_variation_loss(perturbations)
+        elif self.args.visreg == 'UTV+soft_l_inf':
+            max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
+            relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
+            regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean() + 5 * upwind_tv(perturbations)
+        else:
+            if self.args.visreg != None:
+                raise ValueError(f"{self.args.visreg} regularization not defined")
+            regularized_loss = torch.tensor(0)
+        return regularized_loss
 
 class WitchGradientMatchingNoisy(WitchGradientMatching):
     """Brew passenger poison with given arguments.
@@ -280,7 +281,7 @@ class WitchGradientMatchingHidden(WitchGradientMatching):
                 feat_loss = torch.tensor(0)
                 
             if NORMALIZE:
-                inputs = normalize(inputs)
+                inputs = normalization(inputs)
                 
             closure = self._define_objective(inputs, clean_inputs, labels, criterion)
             loss, prediction = victim.compute(closure, self.source_grad, self.source_clean_grad, self.source_gnorm)

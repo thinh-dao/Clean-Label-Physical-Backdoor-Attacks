@@ -61,17 +61,20 @@ def analyze_and_print(stats, output):
     
     # Suspicion Rate
     suspicion_rate = stats['sr']
-    if len(suspicion_rate) == 1:
-        suspicion_rate = [suspicion_rate[0], suspicion_rate[0], suspicion_rate[0]]
-    sr_mean = statistics.mean(suspicion_rate)
-    sr_std = statistics.stdev(suspicion_rate)
-    write('Suspicion rate: {:.1%} ({:.1%})'.format(sr_mean, sr_std), output)
+    if suspicion_rate[0] != None:
+        if len(suspicion_rate) == 1:
+            suspicion_rate = [suspicion_rate[0], suspicion_rate[0], suspicion_rate[0]]
+        sr_mean = statistics.mean(suspicion_rate)
+        sr_std = statistics.stdev(suspicion_rate)
+        write('Suspicion rate: {:.1%} ({:.1%})'.format(sr_mean, sr_std), output)
     
     # False positive rate
     false_positive_rate = stats['fpr']
-    if len(false_positive_rate) == 1:
-        false_positive_rate = [false_positive_rate[0], false_positive_rate[0], false_positive_rate[0]]
-    fpr_mean = statistics.mean(false_positive_rate)
-    fpr_std = statistics.stdev(false_positive_rate)
-    write('False positive rate: {:.1%} ({:.1%})'.format(fpr_mean, fpr_std), output)
+    if false_positive_rate[0] != None:
+        if len(false_positive_rate) == 1:
+            false_positive_rate = [false_positive_rate[0], false_positive_rate[0], false_positive_rate[0]]
+        fpr_mean = statistics.mean(false_positive_rate)
+        fpr_std = statistics.stdev(false_positive_rate)
+        write('False positive rate: {:.1%} ({:.1%})'.format(fpr_mean, fpr_std), output)
+
     write('--------------------------------------------', output)

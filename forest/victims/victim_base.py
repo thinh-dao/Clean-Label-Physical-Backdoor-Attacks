@@ -41,6 +41,8 @@ class _VictimBase:
         """Initialize empty victim."""
         self.args, self.setup, self.num_classes  = args, setup, num_classes
         if self.args.ensemble < len(self.args.net):
+            print(self.args.net)
+            print(self.args.ensemble)
             raise ValueError(f'More models requested than ensemble size.'
                              f'Increase ensemble size or reduce models.')
         self.loss_fn = torch.nn.CrossEntropyLoss()
@@ -129,7 +131,7 @@ class _VictimBase:
             
         write('Starting clean training with {} scenario ...'.format(self.args.scenario), self.args.output)
         
-        if self.args.recipe == 'label-consistent':
+        if self.args.recipe == 'label-consistent' and 'resnet' in self.args.net:
             save_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_robust.pth")
         else:
             save_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
@@ -189,7 +191,7 @@ class _VictimBase:
             self.initialize(seed)
 
             # Train new model
-            write("Validaion {} with seed {}...".format(run+1, seed), self.args.output)
+            write("Validation {} on {} with seed {}...".format(run+1, self.args.net[0], seed), self.args.output)
             self._iterate(kettle, poison_delta=poison_delta, max_epoch=val_max_epoch, stats=stats)
         kettle.args.ablation = original_ablation
         analyze_and_print(stats, output=kettle.args.output)
@@ -235,8 +237,6 @@ class _VictimBase:
             self.model, self.loss_fn, kettle.source_testloader, kettle.poison_setup['poison_class'],
             kettle.setup)
         
-        suspicion_rate, false_positive_rate = check_suspicion(self.model, kettle.suspicionloader, kettle.fploader, kettle.poison_setup['target_class'], kettle.setup)
-        
         valid_loss, valid_acc, valid_acc_target, valid_acc_source = predictions['all']['loss'], predictions['all']['avg'], predictions['target']['avg'], predictions['source']['avg']
         
         write('------------- Validation -------------', self.args.output)
@@ -251,4 +251,6 @@ class _VictimBase:
             write('Backdoor loss: {:7.4f} | Backdoor acc: {:7.4%}'.format(backdoor_loss, backdoor_acc), self.args.output)
             write('Clean    loss: {:7.4f} | Clean    acc: {:7.4%}'.format(clean_loss, clean_acc), self.args.output)
         write('--------------------------------------', self.args.output)
-        write(f'False positive rate: {false_positive_rate:7.4%} | Suspicion rate: {suspicion_rate:7.4%}', self.args.output)
+        if 'cat' not in self.args.dataset:
+            suspicion_rate, false_positive_rate = check_suspicion(self.model, kettle.suspicionloader, kettle.fploader, kettle.poison_setup['target_class'], kettle.setup)
+            write(f'False positive rate: {false_positive_rate:7.4%} | Suspicion rate: {suspicion_rate:7.4%}', self.args.output)

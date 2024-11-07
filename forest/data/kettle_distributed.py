@@ -50,31 +50,32 @@ class KettleDistributed(KettleSingle):
     """
 
     def __init__(self, args, batch_size, augmentations, mixing_method=None,
-                 setup=dict(device=torch.device('cpu'), dtype=torch.float)):
+                 setup=dict(device=torch.device('cpu'), dtype=torch.float), path=None):
         """Initialize with given specs..."""
         self.args, self.setup = args, setup
         self.batch_size = batch_size
         self.augmentations = augmentations
         self.mixing_method = mixing_method
-        self.trainset, self.validset = construct_datasets(self.args, normalize=NORMALIZE)
-        if args.defense == 'strip':
-            num_defense = int(args.clean_budget * len(self.validset))
-            defense_indices = random.sample(range(len(self.validset)), num_defense)
-            self.defenseset = Subset(dataset=self.validset, indices=defense_indices)
+
+        if path == None:
+            path = os.path.join('datasets', self.args.dataset, self.args.trigger)
+
+        self.trainset, self.validset = construct_datasets(path, args, normalize=NORMALIZE)
+
         self.trainset_class_to_idx = self.trainset.class_to_idx
         self.trainset_class_names = self.trainset.classes
         self.prepare_diff_data_augmentations(normalize=NORMALIZE) # Create self.dm, self.ds, self.augment
 
-        self.num_workers = 3
-        
-        self.rank = torch.distributed.get_rank()
+        self.num_workers = torch.get_num_threads()
+        self.local_rank = torch.distributed.get_rank()
         
         # Set random seed
         if self.args.poison_seed is None:
             self.init_seed = np.random.randint(0, 2**32 - 1)
         else:
             self.init_seed = int(self.args.poison_seed)
-        if self.rank == 0: 
+            
+        if self.local_rank == 0: 
             print(f'Initializing poison data with random seed {self.init_seed}')
             write(f'\nInitializing poison data with random seed {self.init_seed}', self.args.output)
             
@@ -90,7 +91,7 @@ class KettleDistributed(KettleSingle):
         self.train_sampler = torch.utils.data.distributed.DistributedSampler(
             self.trainset,
             num_replicas=self.args.world_size,
-            rank=self.args.local_rank,
+            rank=self.local_rank,
         )
         
         # Generate loaders:
@@ -106,7 +107,7 @@ class KettleDistributed(KettleSingle):
             partialset_sampler = torch.utils.data.distributed.DistributedSampler(
                 self.partialset,
                 num_replicas=self.args.world_size,
-                rank=self.args.local_rank,
+                rank=self.local_rank,
             )
             self.partialloader = torch.utils.data.DataLoader(self.partialset, batch_size=min(self.batch_size, len(self.partialset)),
                                                             sampler=partialset_sampler, drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
@@ -138,13 +139,12 @@ class KettleDistributed(KettleSingle):
         # Init is a tensor of shape [num_poisons, channels, height, width] with values in [-eps, eps]
         init.data = torch.max(torch.min(init, self.args.eps / ds / 255), -self.args.eps / ds / 255) # Clip to [-eps, eps]
         # If distributed, sync poison initializations
-        if self.args.local_rank is not None:
-            if DISTRIBUTED_BACKEND == 'nccl':
-                init = init.to(device=self.setup['device'])
-                torch.distributed.broadcast(init, src=0)
-                init = init.to(device=torch.device('cpu'))
-            else:
-                torch.distributed.broadcast(init, src=0)
+        if DISTRIBUTED_BACKEND == 'nccl':
+            init = init.to(device=self.setup['device'])
+            torch.distributed.broadcast(init, src=0)
+            init = init.to(device=torch.device('cpu'))
+        else:
+            torch.distributed.broadcast(init, src=0)
                 
         return init
 
@@ -152,7 +152,7 @@ class KettleDistributed(KettleSingle):
         train_sampler = torch.utils.data.distributed.DistributedSampler(
             self.trainset,
             num_replicas=self.args.world_size,
-            rank=self.args.local_rank,
+            rank=self.local_rank,
         )
         self.trainset = Subset(self.trainset, indices=new_ids)
         self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size,
@@ -179,7 +179,7 @@ class KettleDistributed(KettleSingle):
                 self.bonus_num = len(self.triggerset_dist[target_class])
                 self.args.beta = self.bonus_num/len(self.trainset_dist[target_class])
             
-            if self.rank == 0: write("\nAdd {} images of target class with physical trigger to training set.".format(self.bonus_num), self.args.output)
+            if self.local_rank == 0: write("\nAdd {} images of target class with physical trigger to training set.".format(self.bonus_num), self.args.output)
             
             # Sample bonus_num from target-class data of trigger trainset
             bonus_indices = random.sample(self.triggerset_dist[target_class], self.bonus_num)          
@@ -191,7 +191,7 @@ class KettleDistributed(KettleSingle):
             train_sampler = torch.utils.data.distributed.DistributedSampler(
                 self.trainset,
                 num_replicas=self.args.world_size,
-                rank=self.args.local_rank,
+                rank=self.local_rank,
             )
             
             self.trigger_target_ids = list(range(len(self.trainset)-self.bonus_num, len(self.trainset)))
@@ -202,7 +202,7 @@ class KettleDistributed(KettleSingle):
         if self.args.recipe != 'naive':
             if self.args.alpha > 0.0:
                 poison_class = self.poison_setup['poison_class']
-                if self.rank == 0: write('\nSelecting poisons ...', self.args.output)
+                if self.local_rank == 0: write('\nSelecting poisons ...', self.args.output)
 
                 if self.args.source_criterion in ['cw', 'carlini-wagner']:
                     criterion = cw_loss
@@ -225,7 +225,7 @@ class KettleDistributed(KettleSingle):
                     indices = random.sample(self.trainset_dist[poison_class], self.poison_num)
                     
                 elif self.args.poison_selection_strategy == 'max_gradient':
-                    if self.rank == 0: write('Selections strategy is {}'.format(self.args.poison_selection_strategy), self.args.output)
+                    if self.local_rank == 0: write('Selections strategy is {}'.format(self.args.poison_selection_strategy), self.args.output)
                     
                     # Turning to evaluation mode
                     victim.eval(dropout=True)
@@ -256,7 +256,7 @@ class KettleDistributed(KettleSingle):
                                         grad_norm += grad.detach().pow(2).sum()
                                     grad_norms_list[i].append(grad_norm.sqrt())
 
-                        if self.rank == 0: write(f'Taking average gradient norm of ensemble of {len(victim.models)} models', self.args.output)
+                        if self.local_rank == 0: write(f'Taking average gradient norm of ensemble of {len(victim.models)} models', self.args.output)
                         grad_norms = [sum(col) / float(len(col)) for col in zip(*grad_norms_list)]
                     
                     self.poison_num += ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
@@ -267,13 +267,13 @@ class KettleDistributed(KettleSingle):
 
                 # Select poisons with maximum gradient norm
                 poison_target_ids = poison_target_ids[indices]
-                if self.rank == 0: write('Selecting {} clean samples from class {} with maximum gradients for poisoning'.format(len(poison_target_ids), poison_class), self.args.output)
+                if self.local_rank == 0: write('Selecting {} clean samples from class {} with maximum gradients for poisoning'.format(len(poison_target_ids), poison_class), self.args.output)
                 
                 self.poison_target_ids.extend(poison_target_ids.tolist())
                 self.poisonset = Subset(self.trainset, indices=poison_target_ids)
             
             if self.args.poison_triggered_sample: 
-                if self.rank == 0: write("Selecting {} triggered samples from target class {} for poisoning".format(self.bonus_num, target_class), self.args.output)
+                if self.local_rank == 0: write("Selecting {} triggered samples from target class {} for poisoning".format(self.bonus_num, target_class), self.args.output)
                 
                 self.poison_num += self.bonus_num
                 
@@ -292,7 +292,7 @@ class KettleDistributed(KettleSingle):
             poison_sampler = torch.utils.data.distributed.DistributedSampler(
                 self.poisonset,
                 num_replicas=self.args.world_size,
-                rank=self.args.local_rank,
+                rank=self.local_rank,
             )
             
             if self.poisonset is None: raise ValueError('Poisonset is not defined!')

@@ -10,7 +10,7 @@ from ..utils import cw_loss, write
 torch.backends.cudnn.benchmark = BENCHMARK
 from .witch_base import _Witch
 from ..victims.training import _split_data
-from forest.data.datasets import normalize
+from forest.data.datasets import normalization
 
 class WitchLabelConsistent(_Witch):
     def _define_objective(self, inputs, labels, criterion, *args):
@@ -89,7 +89,7 @@ class WitchLabelConsistent(_Witch):
                 criterion = loss_fn
 
             if NORMALIZE:
-                inputs = normalize(inputs)
+                inputs = normalization(inputs)
                 
             closure = self._define_objective(inputs, labels, criterion)
             loss, prediction = victim.compute(closure, None, None, None)

@@ -9,21 +9,13 @@ from forest.data import datasets
 torch.backends.cudnn.benchmark = BENCHMARK
 import random
 from .witch_base import _Witch
-from forest.data.datasets import normalize
+from forest.data.datasets import normalization
 
 class WitchHTBD(_Witch):
     def _run_trial(self, victim, kettle):
         """Run a single trial."""
-        if self.args.pretrain_perturbation:
-            self._pretrain_perturbation(victim, kettle, poison_delta, poison_bounds)
-        
         poison_delta = kettle.initialize_poison()
         dataloader = kettle.poisonloader
-        # self.args.poison_scheduler = 'linear' # Fix linear scheduler for HTBD
-        # self.args.attackoptim = 'PGD'
-        # self.args.attackiter = 5000
-        # self.tau0 = 0.001
-        # self.args.scheduling = False
 
         validated_batch_size = max(min(kettle.args.pbatch, len(kettle.poisonset)), 1)
 
@@ -54,8 +46,8 @@ class WitchHTBD(_Witch):
             poison_bounds = None
 
         for step in range(self.args.attackiter):
-            if step == 1999 or step == 3999:
-                self.tau0 *= 0.95
+            # if step == 1999 or step == 3999:
+            #     self.tau0 *= 0.95
             source_losses = 0
             poison_correct = 0
             for batch, example in enumerate(dataloader):
@@ -68,7 +60,7 @@ class WitchHTBD(_Witch):
                 sources = torch.stack(sources)
                 
                 if NORMALIZE:
-                    sources = normalize(sources)
+                    sources = normalization(sources)
                     
                 loss, prediction = self._batched_step(poison_delta, poison_bounds, example, victim, kettle, sources)
                 source_losses += loss
@@ -81,6 +73,21 @@ class WitchHTBD(_Witch):
             # For the momentum optimizers, we only accumulate gradients for all poisons
             # and then use optimizer.step() for the update. This is math. equivalent
             # and makes it easier to let pytorch track momentum.
+            
+            # if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
+            #     if self.args.attackoptim in ['momPGD', 'signAdam']:
+            #         poison_delta.grad.sign_()
+            #     att_optimizer.step()
+            #     if self.args.scheduling:
+            #         scheduler.step()
+            #     att_optimizer.zero_grad(set_to_none=False)
+            #     with torch.no_grad():
+            #         # Projection Step
+            #         poison_delta.data = torch.max(torch.min(poison_delta, self.args.eps /
+            #                                                 ds / 255), -self.args.eps / ds / 255)
+            #         poison_delta.data = torch.max(torch.min(poison_delta, (1 - dm) / ds -
+            #                                                 poison_bounds), -dm / ds - poison_bounds)
+                    
             if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
                 if self.args.attackoptim in ['momPGD', 'signAdam']:
                     poison_delta.grad.sign_()
@@ -88,12 +95,20 @@ class WitchHTBD(_Witch):
                 if self.args.scheduling:
                     scheduler.step()
                 att_optimizer.zero_grad(set_to_none=False)
-                with torch.no_grad():
-                    # Projection Step
-                    poison_delta.data = torch.max(torch.min(poison_delta, self.args.eps /
-                                                            ds / 255), -self.args.eps / ds / 255)
-                    poison_delta.data = torch.max(torch.min(poison_delta, (1 - dm) / ds -
-                                                            poison_bounds), -dm / ds - poison_bounds)
+                
+                if "soft" in self.args.visreg:
+                    with torch.no_grad():
+                        # Projection Step
+                        poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
+                        poison_delta.data = torch.clamp(poison_delta.data, min=-poison_bounds, max=1.0 - poison_bounds)
+
+                else:
+                    with torch.no_grad():
+                        # Projection Step
+                        poison_delta.data = torch.max(torch.min(poison_delta, self.args.eps /
+                                                                ds / 255), -self.args.eps / ds / 255)
+                        poison_delta.data = torch.max(torch.min(poison_delta, (1 - dm) / ds -
+                                                                poison_bounds), -dm / ds - poison_bounds)
 
             with torch.no_grad():
                 visual_losses = torch.mean(torch.linalg.matrix_norm(poison_delta))
@@ -156,7 +171,7 @@ class WitchHTBD(_Witch):
                 inputs = kettle.augment(inputs)
             
             if NORMALIZE:
-                inputs = normalize(inputs)
+                inputs = normalization(inputs)
 
             # Perform mixing
             if self.args.pmix:

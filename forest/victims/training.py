@@ -9,7 +9,7 @@ from .utils import print_and_save_stats
 from .batched_attacks import construct_attack
 from ..consts import NON_BLOCKING, BENCHMARK, NORMALIZE, PIN_MEMORY
 from ..utils import write, get_random_subset, get_subset
-from ..data.datasets import normalize, PoisonDataset, Subset
+from ..data.datasets import normalization, PoisonSet, Subset
 torch.backends.cudnn.benchmark = BENCHMARK
 
 def save_stats(stats, predictions, source_adv_acc, source_clean_acc, suspicion_rate, false_positive_rate):
@@ -42,12 +42,13 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
         train_loader = kettle.partialloader
     else:
         train_loader = kettle.trainloader
-        
-    N = len(kettle.trainset)
-    B = int(args.subset_size * N)
-        
+    
+    # If EPIC defense is enabled
     if args.defense == 'EPIC' and (args.subset_size < 1) and (((epoch-1) % args.subset_freq == 0) and (epoch-1) >= args.drop_after and (epoch-1) < args.stop_after):
-        poison_dataset = PoisonDataset(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup)
+        N = len(kettle.trainset)
+        B = int(args.subset_size * N)
+
+        poison_dataset = PoisonSet(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalization=NORMALIZE)
         poison_loader = torch.utils.data.DataLoader(poison_dataset, batch_size=min(kettle.batch_size, len(poison_dataset)),
                                                         shuffle=True, drop_last=False, num_workers=kettle.num_workers, pin_memory=PIN_MEMORY)
         
@@ -63,10 +64,6 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
         new_trainset = Subset(kettle.trainset, subset)
         train_loader = torch.utils.data.DataLoader(new_trainset, batch_size=min(kettle.batch_size, len(new_trainset)),
                                                         shuffle=True, drop_last=False, num_workers=kettle.num_workers, pin_memory=PIN_MEMORY)
-    
-    valid_loader = kettle.validloader
-    fp_loader = kettle.fploader
-    suspicion_loader = kettle.suspicionloader
 
     if defs.novel_defense != None and defs.novel_defense['type'] == 'adversarial-evasion':
         attacker = construct_attack(defs.novel_defense, model, loss_fn, kettle.dm, kettle.ds,
@@ -86,7 +83,7 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
         else:
             activate_defenses = True
 
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler()
     
     for batch, (inputs, labels, ids) in enumerate(train_loader):
         if times_selected != None:
@@ -98,12 +95,8 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
         if poison_delta is not None:
             poison_slices, batch_positions = kettle.lookup_poison_indices(ids)
             if len(batch_positions) > 0:
-                if kettle.args.constrain_perturbation:
-                    inputs[batch_positions] += (poison_delta[poison_slices] * kettle.faces_overlays[poison_slices])               
-                else:
-                    inputs[batch_positions] += poison_delta[poison_slices]
+                inputs[batch_positions] += poison_delta[poison_slices]
                     
-                
                 if kettle.args.recipe == 'label-consistent': 
                     kettle.patch_inputs(inputs, batch_positions, poison_slices)
             
@@ -127,9 +120,6 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
                                                             steps=defs.novel_defense['steps'])
 
                     inputs = inputs + delta  # Kind of a reparametrization trick
-            
-        if NORMALIZE:
-            inputs = normalize(inputs)  
 
         # Change loss function to include corrective terms if mixing with correction
         if activate_defenses and (defs.mixing_method != None and defs.mixing_method['correction']):
@@ -141,6 +131,9 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
                 predictions = torch.argmax(outputs.data, dim=1)
                 correct_preds = (predictions == labels).sum().item()
                 return loss, correct_preds
+        
+        if NORMALIZE:
+            inputs = normalization(inputs)  
 
         outputs = model(inputs)
         loss, preds = criterion(outputs, labels)
@@ -174,8 +167,7 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
                         raise ValueError(f'Invalid distribution {defs.privacy["distribution"]} given.')
                     for param in differentiable_params:
                         param.grad += generator.sample(param.shape)
-
-
+                        
         scaler.step(optimizer)
         scaler.update()
 
@@ -188,7 +180,7 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
         scheduler.step()
 
     if epoch == defs.epochs or epoch % defs.validate == 0 or kettle.args.dryrun:
-        predictions = run_validation(model, loss_fn, valid_loader,
+        predictions = run_validation(model, loss_fn, kettle.validloader,
                                                 kettle.poison_setup['poison_class'],
                                                 kettle.poison_setup['source_class'],
                                                 kettle.setup)
@@ -196,9 +188,9 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
         source_adv_acc, source_adv_loss, source_clean_acc, source_clean_loss = check_sources(
             model, loss_fn, kettle.source_testloader, kettle.poison_setup['poison_class'],
             kettle.setup)
-        
-        if epoch == defs.epochs or kettle.args.dryrun:
-            suspicion_rate, false_positive_rate = check_suspicion(model, suspicion_loader, fp_loader, kettle.poison_setup['target_class'], kettle.setup)
+
+        if ('cat' not in kettle.args.dataset) and (epoch == defs.epochs or kettle.args.dryrun):
+            suspicion_rate, false_positive_rate = check_suspicion(model, kettle.suspicionloader, kettle.fploader, kettle.poison_setup['target_class'], kettle.setup)
         else:
             suspicion_rate, false_positive_rate = None, None
             

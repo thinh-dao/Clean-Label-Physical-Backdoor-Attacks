@@ -14,30 +14,20 @@ from torchvision.transforms import v2 as transforms
 from PIL import Image
 from torchvision.datasets import DatasetFolder
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from ..consts import NORMALIZE, PIN_MEMORY, NUM_CLASSES
-
-
-IMG_EXTENSIONS = (".jpg", ".jpeg", ".png", ".ppm", ".bmp", ".pgm", ".tif", ".tiff", ".webp")
+from ..consts import PIN_MEMORY, NUM_CLASSES
 
 data_transforms = {
-    'train_augment':
-    transforms.Compose([
-        transforms.Resize(224),
-        transforms.ToImageTensor(),
-        transforms.ConvertImageDtype(),
-        transforms.RandomHorizontalFlip()
-    ]),
     'train':
     transforms.Compose([
         transforms.Resize(224),
-        transforms.ToImageTensor(),
-        transforms.ConvertImageDtype(),
+        transforms.ToImage(), 
+        transforms.ToDtype(torch.float32, scale=True)
     ]),
     'test':
     transforms.Compose([
         transforms.Resize(224),
-        transforms.ToImageTensor(),
-        transforms.ConvertImageDtype(),
+        transforms.ToImage(), 
+        transforms.ToDtype(torch.float32, scale=True)
     ]),
 }
 
@@ -50,44 +40,33 @@ def pil_loader(path: str) -> Image.Image:
 def default_loader(path: str) -> Any:
     return pil_loader(path)
 
-data_mean = [0.5508784055709839, 0.458417683839798, 0.417265921831131] 
-data_std = [0.24289922416210175, 0.22884903848171234, 0.23412548005580902]
+    
+normalization = None
 
-from kornia.augmentation import Normalize, Denormalize
-normalize = Normalize(mean = data_mean, std=data_std)
-denormalize = Denormalize(mean = data_mean, std=data_std)
-
-def construct_datasets(path, normalize=NORMALIZE):
+def construct_datasets(path, normalize=False):
     """Construct datasets with appropriate transforms."""
-    # Compute mean, std:
+    global normalization
 
     train_path = os.path.join(path, 'train')
-    transform_train = copy.deepcopy(data_transforms['train']) # Since we do differential augmentation, we dont need to augment here
-    trainset = ImageDataset(train_path, transform=transform_train)        
-        
+    trainset = ImageDataset(train_path, transform=data_transforms['train']) # Since we do differential augmentation, we dont need to augment here
+
     valid_path = os.path.join(path, 'test')
-    transform_test = copy.deepcopy(data_transforms['test'])
-    validset = ImageDataset(valid_path, transform=transform_test)
+    validset = ImageDataset(valid_path, transform=data_transforms['test'])
 
     if normalize:
-        # cc = torch.cat([trainset[i][0].reshape(3, -1) for i in range(len(trainset))], dim=1)
-        # data_mean = torch.mean(cc, dim=1).tolist()
-        # data_std = torch.std(cc, dim=1).tolist()
+        cc = torch.cat([trainset[i][0].reshape(3, -1) for i in range(len(trainset))], dim=1)
+        data_mean = torch.mean(cc, dim=1).tolist()
+        data_std = torch.std(cc, dim=1).tolist()
         print(f'Data mean is {data_mean}. \nData std  is {data_std}.')
-        # transform_train.transforms.append(transforms.Normalize(data_mean, data_std))
-        transform_test.transforms.append(transforms.Normalize(data_mean, data_std))
+
+        validset.transform.transforms.append(transforms.Normalize(data_mean, data_std))
+        normalization = transforms.Normalize(data_mean, data_std)
         
-        trainset.data_mean = (0.0, 0.0, 0.0)
-        validset.data_mean = (0.0, 0.0, 0.0)
+        trainset.data_mean = data_mean
+        validset.data_mean = data_mean
         
-        trainset.data_std = (1.0, 1.0, 1.0)
-        validset.data_std = (1.0, 1.0, 1.0)
-        
-        # trainset.data_mean = data_mean
-        # validset.data_mean = data_mean
-        
-        # trainset.data_std = data_std
-        # validset.data_std = data_std
+        trainset.data_std = data_std
+        validset.data_std = data_std
     else:
         print('Normalization disabled.')
         trainset.data_mean = (0.0, 0.0, 0.0)
@@ -139,16 +118,10 @@ class Subset(torch.utils.data.Dataset):
         # So, we need to manually deepcopy the wrapped dataset or raise error when "__setstate__" is called. Here we choose the first solution.
         return Subset(copy.deepcopy(self.dataset), copy.deepcopy(self.indices), copy.deepcopy(self.transform))
 
-class PoisonDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, poison_delta, poison_lookup):
+class PoisonSet(torch.utils.data.Dataset):
+    def __init__(self, dataset, poison_delta, poison_lookup, normalize=False):
         self.dataset = copy.deepcopy(dataset)
-        if len(self.dataset.transform.transforms) > 3:
-            self.transform = transforms.Compose(copy.deepcopy(self.dataset.transform.transforms[3:]))
-        else:
-            self.transform = None
-        self.target_transform = None
-        
-        self.dataset.transform.transforms = self.dataset.transform.transforms[:3]
+        self.normalize = normalize
         self.poison_delta = poison_delta
         self.poison_lookup = poison_lookup
 
@@ -160,10 +133,8 @@ class PoisonDataset(torch.utils.data.Dataset):
         
         if self.transform is not None:
             sample = self.transform(sample)
-        if NORMALIZE:
-            sample = normalize(sample).squeeze()
-        if self.target_transform is not None:
-            target = self.target_transform(target)
+        if self.normalization:
+            sample = normalization(sample)
         return sample, target, index
 
     def __len__(self):
@@ -278,6 +249,7 @@ class ImageDataset(DatasetFolder):
     """
     This class inherits from DatasetFolder and filter out the data from the target class
     """
+
     def __init__(
         self,
         root: str,
@@ -296,7 +268,7 @@ class ImageDataset(DatasetFolder):
         super().__init__(
             root,
             loader,
-            IMG_EXTENSIONS if is_valid_file is None else None,
+            extensions=(".jpg", ".jpeg", ".png") if is_valid_file is None else None,
             transform=transform,
             target_transform=target_transform,
             is_valid_file=is_valid_file,
@@ -468,7 +440,7 @@ class EarlyStopping:
         self.val_loss_min = val_loss
         
 class TriggerSet(ImageDataset):
-    """Use for creating triggerset, epecially when the number of classes in triggerset is different from the original dataset.
+    """Use for creating triggerset when the number of classes in triggerset is different from the original dataset.
 
     Args:
         torch (_type_): _description_
@@ -560,8 +532,6 @@ class FaceDetector:
         """
         Given a Dataset object, return a dictionary of landmarks and facial area for each image
         """
-        if self.args.constrain_perturbation:
-            self.dataset_face_overlay = torch.zeros((len(self.dataset), 224, 224))
         if self.patch_trigger != None:
             self.trigger_mask = torch.zeros((len(self.dataset), 4, 224, 224)) #4 as we have alpha layer
         
@@ -570,8 +540,6 @@ class FaceDetector:
             
             if len(landmarks) == 0:
                 print('Faulty image: ', idx)
-                if self.args.constrain_perturbation:
-                    self.dataset_face_overlay[idx] = torch.ones((224, 224))
                 
                 if self.patch_trigger != None:
                     new_height = int(self.trigger_img.shape[0] * 50 / self.trigger_img.shape[1])
@@ -583,12 +551,11 @@ class FaceDetector:
                     black_frame[top_offset:top_offset+new_height, left_offset:left_offset+50, :] = resized_image
                     self.trigger_mask[idx] = black_frame
             else: 
-                if self.args.constrain_perturbation:
-                    mask = np.zeros((224, 224))
-                    bound = [landmarks[i] for i in range(len(landmarks)) if i < 17 or i > 67]
-                    routes = np.asarray([bound[i] for i in range(17)] + [bound[27], bound[23], bound[28], bound[22], bound[21], bound[29], bound[20], bound[19], bound[18], bound[17], bound[25], bound[24], bound[26]])
-                    mask = torch.tensor(cv2.fillConvexPoly(mask, routes, 1)).to(torch.bool)
-                    self.dataset_face_overlay[idx] = mask
+                mask = np.zeros((224, 224))
+                bound = [landmarks[i] for i in range(len(landmarks)) if i < 17 or i > 67]
+                routes = np.asarray([bound[i] for i in range(17)] + [bound[27], bound[23], bound[28], bound[22], bound[21], bound[29], bound[20], bound[19], bound[18], bound[17], bound[25], bound[24], bound[26]])
+                mask = torch.tensor(cv2.fillConvexPoly(mask, routes, 1)).to(torch.bool)
+                self.dataset_face_overlay[idx] = mask
                     
                 if self.patch_trigger != None:
                     self.trigger_mask[idx] = self._get_transform_trigger(landmarks)           

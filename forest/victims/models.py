@@ -3,33 +3,25 @@
 import torch
 import torch.nn as nn
 import math
-import copy
+import os
 from torch.nn import functional as F
+from torchvision.models import resnet50, ResNet50_Weights
 
 from torchvision import models
 from torchvision.models.resnet import BasicBlock, Bottleneck
 
 import pickle
 
-def bypass_last_layer(model):
-    """Hacky way of separating features and classification head for many models.
-
-    Patch this function if problems appear.
-    """
-    if isinstance(model, torch.nn.DataParallel):
-        layer_cake = list(model.module.children())
-    else:
-        layer_cake = list(model.children())
-    last_layer = layer_cake[-1]
-    headless_model = torch.nn.Sequential(*(layer_cake[:-1]), torch.nn.Flatten()).eval()  # this works most of the time all of the time :<
-    return headless_model, last_layer
-
 def get_model(model_name, num_classes=10, pretrained=True):
     """Get model instance (ResNet50, VGG16, DenseNet121)"""
     if model_name.lower() == 'resnet50':
-        model = resnet50(num_classes=8631) # 8631 is the number of classes in VGGFace2
+        model = resnet50_normal(num_classes=8631) # 8631 is the number of classes in VGGFace2
         if pretrained: 
-            load_state_dict(model, 'pretrained/resnet50_vgg_face2.pkl')
+            load_state_dict(model, 'pretrained/resnet50_vggface2.pkl')
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(in_features=num_ftrs, out_features=num_classes)   
+    elif model_name.lower() == 'resnet50_imagenet':
+        model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
         num_ftrs = model.fc.in_features
         model.fc = nn.Linear(in_features=num_ftrs, out_features=num_classes)   
     elif model_name.lower() == 'vgg16':  
@@ -49,18 +41,15 @@ def get_model(model_name, num_classes=10, pretrained=True):
         model = MobileNetV2(num_classes=1000, width_mult=1.0)
         if pretrained:
             # Load the pre-trained weights if required
-            path = "/home/ubuntu/21thinh.dd/Clean-label-Physical-Backdoor-Attack/pretrained/mobilenetv2_1.0-0c6065bc.pth"
+            path = "pretrained/mobilenet_imagenet.pth"
             state_dict = torch.load(path)
             model.load_state_dict(state_dict)
-            # If the number of classes in your dataset is different from the pretrained model,
-            # you need to replace the classifier as well
+            # Replace the classifier as well the number of classes in your dataset is different from the pretrained model
+            
             if num_classes != 1000:
                 model.classifier = nn.Linear(model.classifier.in_features, num_classes)
-                
-    elif model_name.lower() == 'densenet121':
-        raise NotImplementedError('DenseNet121 not implemented')
     else:
-        raise NotImplementedError('Model not implemented')
+        raise NotImplementedError(f'Model {model_name} not implemented')
     return model
 
 
@@ -293,7 +282,7 @@ class Vgg_face_dag(nn.Module):
         x38 = self.fc8(x37)
         return x38
 
-def resnet50(**kwargs):
+def resnet50_normal(**kwargs):
     """Constructs a ResNet-50 model.
     """
     model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
@@ -334,16 +323,6 @@ def vgg_face_dag(weights_path=None, **kwargs):
         state_dict = torch.load(weights_path)
         model.load_state_dict(state_dict)
     return model
-
-def test_vgg_16(num_classes=10):
-    model = vgg_face_dag(weights_path='pretrained/vgg_face_dag.pth')
-    feature, classifier = bypass_last_layer(model)
-    # print(classifier)
-    feature_model = copy.deepcopy(model)
-    feature_model.fc8 = nn.Identity()
-    tensor = torch.randn(1, 3, 224, 224)
-    out1 = feature(tensor)
-    out2 = feature_model(tensor)
 
 class BasicConv2d(nn.Module):
 
@@ -516,7 +495,6 @@ class Mixed_7a(nn.Module):
         out = torch.cat((x0, x1, x2, x3), 1)
         return out
 
-
 class InceptionResnetV1(nn.Module):
     """Inception Resnet V1 model with optional loading of pretrained weights.
 
@@ -590,6 +568,7 @@ class InceptionResnetV1(nn.Module):
         self.block8 = Block8(noReLU=True)
         self.avgpool_1a = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(dropout_prob)
+        self.flatten = nn.Flatten(start_dim=1)
         self.last_linear = nn.Linear(1792, 512, bias=False)
         self.last_bn = nn.BatchNorm1d(512, eps=0.001, momentum=0.1, affine=True)
 
@@ -629,7 +608,8 @@ class InceptionResnetV1(nn.Module):
         x = self.block8(x)
         x = self.avgpool_1a(x)
         x = self.dropout(x)
-        x = self.last_linear(x.view(x.shape[0], -1))
+        x = self.flatten(x)
+        x = self.last_linear(x)
         x = self.last_bn(x)
         if self.classify:
             x = self.logits(x)
@@ -637,27 +617,27 @@ class InceptionResnetV1(nn.Module):
             x = F.normalize(x, p=2, dim=1)
         return x
 
-
-def load_weights(mdl, name):
+def load_weights(model, name):
     """Download pretrained state_dict and load into model.
 
     Arguments:
-        mdl {torch.nn.Module} -- Pytorch model.
+        model {torch.nn.Module} -- Pytorch model.
         name {str} -- Name of dataset that was used to generate pretrained state_dict.
 
     Raises:
         ValueError: If 'pretrained' not equal to 'vggface2' or 'casia-webface'.
     """
     if name == 'vggface2':
-        path = '/home/ubuntu/21thinh.dd/Clean-label-Physical-Backdoor-Attack/pretrained/20180402-114759-vggface2.pt'
+        path = 'pretrained/mobilenetv2_vggface2.pt'
     elif name == 'casia-webface':
-        path = '/home/ubuntu/21thinh.dd/Clean-label-Physical-Backdoor-Attack/pretrained/20180408-102900-casia-webface.pt'
+        path = 'pretrained/mobilenetv2_casia-webface.pt'
     else:
         raise ValueError('Pretrained models only exist for "vggface2" and "casia-webface"')
 
+    assert os.path.exists(path), f"Pretrained model {path} does not exist"
+
     state_dict = torch.load(path)
-    mdl.load_state_dict(state_dict)
-    
+    model.load_state_dict(state_dict)
     
 def _make_divisible(v, divisor, min_value=None):
     """

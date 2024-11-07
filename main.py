@@ -7,14 +7,17 @@ import datetime
 import time
 
 import forest
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 from forest.utils import write, set_random_seed
-from forest.consts import BENCHMARK
+from forest.consts import BENCHMARK, SHARING_STRATEGY
+
 torch.backends.cudnn.benchmark = BENCHMARK
+torch.multiprocessing.set_sharing_strategy(SHARING_STRATEGY)
 
 # Parse input arguments
 args = forest.options().parse_args()
-args.dataset = os.path.join('datasets', args.dataset)
 if args.recipe == 'naive' or args.recipe == 'label-consistent': 
     args.threatmodel = 'clean-multi-source'
 
@@ -28,8 +31,8 @@ if args.exp_name is None:
     exp_num = len(os.listdir(os.path.join(os.getcwd(), 'outputs'))) + 1
     args.exp_name = f'exp_{exp_num}'
 
-args.output = f'outputs/{args.exp_name}/{args.recipe}/{args.trigger}/{args.net[0].upper()}/{args.poisonkey}_{args.trigger}_{args.alpha}_{args.beta}_{args.eps}_{args.attackoptim}_{args.attackiter}.txt'
-print(args.output)
+args.output = f'outputs/{args.exp_name}/{args.recipe}/{args.trigger}/{args.net[0].upper()}/{args.poisonkey}_{args.trigger}_{args.alpha}_{args.eps}_{args.attackoptim}_{args.attackiter}.txt'
+print("Output is logged in", args.output)
 os.makedirs(os.path.dirname(args.output), exist_ok=True)
 open(args.output, 'w').close() # Clear the output files
 
@@ -40,7 +43,7 @@ if __name__ == "__main__":
     
     setup = forest.utils.system_startup(args) # Set up device and torch data type
     
-    num_classes = len(os.listdir(os.path.join(args.dataset, args.trigger, 'train')))
+    num_classes = len(os.listdir(os.path.join("datasets",args.dataset, 'train')))
     model = forest.Victim(args, num_classes=num_classes, setup=setup) # Initialize model and loss_fn
     data = forest.Kettle(args, model.defs.batch_size, model.defs.augmentations,
                          model.defs.mixing_method, setup=setup) # Set up trainloader, validloader, poisonloader, poison_ids, trainset/poisonset/source_testset
@@ -54,11 +57,6 @@ if __name__ == "__main__":
         
     train_time = time.time()
     print("Train time: ", str(datetime.timedelta(seconds=train_time - start_time)))
-    
-    if args.recipe != 'naive' and witch.args.backdoor_finetuning:
-        witch.backdoor_finetuning(model, data, lr=0.000005, num_epoch=25)
-        if witch.args.load_feature_repr:
-            model.save_feature_representation()
                 
     # Select poisons based on maximum gradient norm
     data.select_poisons(model)
@@ -86,10 +84,10 @@ if __name__ == "__main__":
     # Validation
     if args.vnet is not None:  # Validate the transfer model given by args.vnet
         train_net = args.net
-        args.net = args.vnet
-        args.ensemble = len(args.vnet)
-        if args.vruns > 0:
-            model = forest.Victim(args, num_classes=num_classes, setup=setup)  # this instantiates a new model with a different architecture
+        args.ensemble = 1
+        for m in args.vnet:
+            args.net = [m]
+            model = forest.Victim(args, num_classes=num_classes, setup=setup) # this instantiates a new model with a different architecture
             model.validate(data, poison_delta, val_max_epoch=args.val_max_epoch)
         args.net = train_net
     else:  # Validate the main model

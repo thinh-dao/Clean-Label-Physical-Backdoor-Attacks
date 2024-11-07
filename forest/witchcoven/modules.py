@@ -20,7 +20,7 @@ class MetaMonkey(torch.nn.Module):
         """Init with network."""
         super().__init__()
         self.net = net
-        self.parameters = OrderedDict(net.named_parameters())
+        self._parameters = OrderedDict(net.named_parameters())
 
 
     def forward(self, inputs, parameters=None):

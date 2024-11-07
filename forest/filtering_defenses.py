@@ -1,8 +1,8 @@
 import torch
 import numpy as np
-import defense.cleansers.robust_estimation as robust_estimation
 import random
-from .data.datasets import PoisonDataset, normalize
+
+from .data.datasets import PoisonSet, normalization
 from tqdm import tqdm
 from .consts import NON_BLOCKING, NORMALIZE
 from sklearn.decomposition import FastICA
@@ -38,7 +38,7 @@ def _get_poisoned_features(kettle, victim, poison_delta, dryrun=False):
             if lookup is not None and poison_delta is not None:
                 img += poison_delta[lookup, :, :, :]
             if NORMALIZE:
-                img = normalize(img).to(**kettle.setup)
+                img = normalization(img).to(**kettle.setup)
             else:
                 img = img.unsqueeze(0).to(**kettle.setup)
             feats.append(feature_extractor(img))
@@ -181,156 +181,6 @@ def _ActivationClustering(kettle, victim, poison_delta, args, num_classes=10, cl
     
     clean_indices = list(set(range(len(kettle.trainset))) - set(suspicious_indices))    
     return clean_indices
-
-
-def _Spectre(kettle, victim, poison_delta, args, num_classes=10):
-    """
-    Spectre defense method implementation.
-    Returns a list of clean indices.
-    """
-    # Load data using your framework's data loading function
-    feats, class_indices = _get_poisoned_features(kettle, victim, poison_delta, dryrun=kettle.args.dryrun)
-    clean_feats, clean_class_indices = _get_cleaned_features(kettle, victim, dryrun=kettle.args.dryrun)
-    suspicious_indices = []
-    raw_poison_rate = args.alpha +args.beta
-    budget = int(raw_poison_rate * len(kettle.trainset_dist[kettle.poison_setup['poison_class']]) * 1.5)
-
-    max_dim = 2 # 64
-    class_taus = []
-    class_S = []
-    for i in range(num_classes):
-
-        if len(class_indices[i]) > 1:
-
-            # feats for class i in poisoned set
-            temp_feats = np.array([feats[temp_idx].squeeze(0).cpu().numpy() for temp_idx in class_indices[i]])
-            temp_feats = torch.FloatTensor(temp_feats).cuda()
-
-            temp_clean_feats = None
-            temp_clean_feats = np.array([clean_feats[temp_idx].squeeze(0).cpu().numpy() for temp_idx in clean_class_indices[i]])
-            temp_clean_feats = torch.FloatTensor(temp_clean_feats).cuda()
-            temp_clean_feats = temp_clean_feats - temp_feats.mean(dim=0)
-            temp_clean_feats = temp_clean_feats.T
-
-            temp_feats = temp_feats - temp_feats.mean(dim=0) # centered data
-            temp_feats = temp_feats.T # feats arranged in column
-
-            U, _, _ = torch.svd(temp_feats)
-            U = U[:, :max_dim]
-
-            # full projection
-            projected_feats = torch.matmul(U.T, temp_feats)
-
-            max_tau = -999999
-            best_n_dim = -1
-            best_to_be_removed = None
-
-            for n_dim in range(2, max_dim+1): # enumarate all possible "reudced dimensions" and select the best
-
-                S_removed, S_left = SPECTRE(U, temp_feats, n_dim, budget, temp_clean_feats)
-
-                left_feats = projected_feats[:, S_left]
-                covariance = torch.cov(left_feats)
-
-                L, V = torch.linalg.eig(covariance)
-                L, V = L.real, V.real
-                L = (torch.diag(L) ** (1 / 2) + 0.001).inverse()
-                normalizer = torch.matmul(V, torch.matmul(L, V.T))
-
-                whitened_feats = torch.matmul(normalizer, projected_feats)
-
-                tau = QUEscore(whitened_feats, max_dim).mean()
-
-                if tau > max_tau:
-                    max_tau = tau
-                    best_n_dim = n_dim
-                    best_to_be_removed = S_removed
-
-
-            # print('class=%d, dim=%d, tau=%f' % (i, best_n_dim, max_tau))
-
-            class_taus.append(max_tau)
-
-            suspicious_indices = []
-            for temp_index in best_to_be_removed:
-                suspicious_indices.append(class_indices[i][temp_index])
-
-            class_S.append(suspicious_indices)
-
-    class_taus = np.array(class_taus)
-    median_tau = np.median(class_taus)
-
-    #print('median_tau : %d' % median_tau)
-    suspicious_indices = []
-    max_tau = -99999
-    for i in range(num_classes):
-        #if class_taus[i] > max_tau:
-        #    max_tau = class_taus[i]
-        #    suspicious_indices = class_S[i]
-        #print('class-%d, tau = %f' % (i, class_taus[i]))
-        #if class_taus[i] > 2*median_tau:
-        #    print('[large tau detected] potential poisons! Apply Filter!')
-        for temp_index in class_S[i]:
-            suspicious_indices.append(temp_index)
-    clean_indices = list(set(range(len(kettle.trainset))) - set(suspicious_indices))
-    return clean_indices
-
-def QUEscore(temp_feats, n_dim):
-
-    n_samples = temp_feats.shape[1]
-    alpha = 4.0
-    Sigma = torch.matmul(temp_feats, temp_feats.T) / n_samples
-    I = torch.eye(n_dim).cuda()
-    Q = torch.exp((alpha * (Sigma - I)) / (torch.linalg.norm(Sigma, ord=2) - 1))
-    trace_Q = torch.trace(Q)
-
-    taus = []
-    for i in range(n_samples):
-        h_i = temp_feats[:, i:i + 1]
-        tau_i = torch.matmul(h_i.T, torch.matmul(Q, h_i)) / trace_Q
-        tau_i = tau_i.item()
-        taus.append(tau_i)
-    taus = np.array(taus)
-
-    return taus
-
-def SPECTRE(U, temp_feats, n_dim, budget, oracle_clean_feats=None):
-
-    projector = U[:, :n_dim].T # top left singular vectors
-    temp_feats = torch.matmul(projector, temp_feats)
-
-    if oracle_clean_feats is None:
-        estimator = robust_estimation.BeingRobust(random_state=0, keep_filtered=True).fit((temp_feats.T).cpu().numpy())
-        clean_mean = torch.FloatTensor(estimator.location_).cuda()
-        filtered_feats = (torch.FloatTensor(estimator.filtered_).cuda() - clean_mean).T
-        clean_covariance = torch.cov(filtered_feats)
-    else:
-        clean_feats = torch.matmul(projector, oracle_clean_feats)
-        clean_covariance = torch.cov(clean_feats)
-        clean_mean = clean_feats.mean(dim = 1)
-
-
-    temp_feats = (temp_feats.T - clean_mean).T
-
-    # whiten the data
-    L, V = torch.linalg.eig(clean_covariance)
-    L, V = L.real, V.real
-    L = (torch.diag(L)**(1/2)+0.001).inverse()
-    normalizer = torch.matmul(V, torch.matmul( L, V.T ) )
-    temp_feats = torch.matmul(normalizer, temp_feats)
-
-    # compute QUEscore
-    taus = QUEscore(temp_feats, n_dim)
-
-    sorted_indices = np.argsort(taus)
-    n_samples = len(sorted_indices)
-
-    budget = min(budget, n_samples//2) # default assumption : at least a half of samples in each class is clean
-
-    suspicious = sorted_indices[-budget:]
-    left = sorted_indices[:n_samples-budget]
-
-    return suspicious, left
     
 def _Strip(kettle, victim, poison_delta, args, num_classes=10):
     strip_alpha = 1.0
@@ -369,7 +219,7 @@ def _Strip(kettle, victim, poison_delta, args, num_classes=10):
         return (-p * p.log()).sum(1)
     
     # choose a decision boundary with the test set
-    inspection_set = PoisonDataset(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup)
+    inspection_set = PoisonSet(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalization=NORMALIZE)
     clean_entropy = []
     clean_set_loader = torch.utils.data.DataLoader(kettle.validset, batch_size=batch_size, shuffle=False)
     for _input, _label, _ in tqdm(clean_set_loader):
@@ -405,7 +255,7 @@ def _NeuralCleanse(kettle, victim, poison_delta, args, num_classes=10):
 def _Scan(kettle, victim, poison_delta, args, num_classes=10):
     kwargs = {'num_workers': 3, 'pin_memory': True}
 
-    inspection_set = PoisonDataset(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup)
+    inspection_set = PoisonSet(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalization=NORMALIZE)
     # main dataset we aim to cleanse
     inspection_split_loader = torch.utils.data.DataLoader(
         inspection_set,
@@ -430,8 +280,6 @@ def _Scan(kettle, victim, poison_delta, args, num_classes=10):
     # projector = PCA(n_components=128)
     # feats_inspection = projector.fit_transform(feats_inspection)
     # feats_clean = projector.fit_transform(feats_clean)
-
-
 
     scan = SCAn()
 
@@ -489,14 +337,8 @@ def _Scan(kettle, victim, poison_delta, args, num_classes=10):
 
     clean_idcs = list(set(range(len(kettle.trainset))) - set(suspicious_indices))
     return clean_idcs
-    
-import numpy as np
-import torch
-from tqdm import tqdm
 
 EPS = 1e-5
-
-
 class SCAn:
     def __init__(self):
         pass
@@ -727,6 +569,343 @@ def get_features(data_loader, model):
 
     return feats, class_indices
 
+def _Spectre(kettle, victim, poison_delta, args, num_classes=10):
+    """
+    Spectre defense method implementation.
+    Returns a list of clean indices.
+    """
+    # Load data using your framework's data loading function
+    feats, class_indices = _get_poisoned_features(kettle, victim, poison_delta, dryrun=kettle.args.dryrun)
+    clean_feats, clean_class_indices = _get_cleaned_features(kettle, victim, dryrun=kettle.args.dryrun)
+    suspicious_indices = []
+    raw_poison_rate = args.alpha +args.beta
+    budget = int(raw_poison_rate * len(kettle.trainset_dist[kettle.poison_setup['poison_class']]) * 1.5)
+
+    max_dim = 2 # 64
+    class_taus = []
+    class_S = []
+    for i in range(num_classes):
+
+        if len(class_indices[i]) > 1:
+
+            # feats for class i in poisoned set
+            temp_feats = np.array([feats[temp_idx].squeeze(0).cpu().numpy() for temp_idx in class_indices[i]])
+            temp_feats = torch.FloatTensor(temp_feats).cuda()
+
+            temp_clean_feats = None
+            temp_clean_feats = np.array([clean_feats[temp_idx].squeeze(0).cpu().numpy() for temp_idx in clean_class_indices[i]])
+            temp_clean_feats = torch.FloatTensor(temp_clean_feats).cuda()
+            temp_clean_feats = temp_clean_feats - temp_feats.mean(dim=0)
+            temp_clean_feats = temp_clean_feats.T
+
+            temp_feats = temp_feats - temp_feats.mean(dim=0) # centered data
+            temp_feats = temp_feats.T # feats arranged in column
+
+            U, _, _ = torch.svd(temp_feats)
+            U = U[:, :max_dim]
+
+            # full projection
+            projected_feats = torch.matmul(U.T, temp_feats)
+
+            max_tau = -999999
+            best_n_dim = -1
+            best_to_be_removed = None
+
+            for n_dim in range(2, max_dim+1): # enumarate all possible "reudced dimensions" and select the best
+
+                S_removed, S_left = SPECTRE(U, temp_feats, n_dim, budget, temp_clean_feats)
+
+                left_feats = projected_feats[:, S_left]
+                covariance = torch.cov(left_feats)
+
+                L, V = torch.linalg.eig(covariance)
+                L, V = L.real, V.real
+                L = (torch.diag(L) ** (1 / 2) + 0.001).inverse()
+                normalizer = torch.matmul(V, torch.matmul(L, V.T))
+
+                whitened_feats = torch.matmul(normalizer, projected_feats)
+
+                tau = QUEscore(whitened_feats, max_dim).mean()
+
+                if tau > max_tau:
+                    max_tau = tau
+                    best_n_dim = n_dim
+                    best_to_be_removed = S_removed
 
 
+            # print('class=%d, dim=%d, tau=%f' % (i, best_n_dim, max_tau))
 
+            class_taus.append(max_tau)
+
+            suspicious_indices = []
+            for temp_index in best_to_be_removed:
+                suspicious_indices.append(class_indices[i][temp_index])
+
+            class_S.append(suspicious_indices)
+
+    class_taus = np.array(class_taus)
+    median_tau = np.median(class_taus)
+
+    #print('median_tau : %d' % median_tau)
+    suspicious_indices = []
+    max_tau = -99999
+    for i in range(num_classes):
+        #if class_taus[i] > max_tau:
+        #    max_tau = class_taus[i]
+        #    suspicious_indices = class_S[i]
+        #print('class-%d, tau = %f' % (i, class_taus[i]))
+        #if class_taus[i] > 2*median_tau:
+        #    print('[large tau detected] potential poisons! Apply Filter!')
+        for temp_index in class_S[i]:
+            suspicious_indices.append(temp_index)
+    clean_indices = list(set(range(len(kettle.trainset))) - set(suspicious_indices))
+    return clean_indices
+
+def QUEscore(temp_feats, n_dim):
+
+    n_samples = temp_feats.shape[1]
+    alpha = 4.0
+    Sigma = torch.matmul(temp_feats, temp_feats.T) / n_samples
+    I = torch.eye(n_dim).cuda()
+    Q = torch.exp((alpha * (Sigma - I)) / (torch.linalg.norm(Sigma, ord=2) - 1))
+    trace_Q = torch.trace(Q)
+
+    taus = []
+    for i in range(n_samples):
+        h_i = temp_feats[:, i:i + 1]
+        tau_i = torch.matmul(h_i.T, torch.matmul(Q, h_i)) / trace_Q
+        tau_i = tau_i.item()
+        taus.append(tau_i)
+    taus = np.array(taus)
+
+    return taus
+
+def SPECTRE(U, temp_feats, n_dim, budget, oracle_clean_feats=None):
+
+    projector = U[:, :n_dim].T # top left singular vectors
+    temp_feats = torch.matmul(projector, temp_feats)
+
+    if oracle_clean_feats is None:
+        estimator = BeingRobust(random_state=0, keep_filtered=True).fit((temp_feats.T).cpu().numpy())
+        clean_mean = torch.FloatTensor(estimator.location_).cuda()
+        filtered_feats = (torch.FloatTensor(estimator.filtered_).cuda() - clean_mean).T
+        clean_covariance = torch.cov(filtered_feats)
+    else:
+        clean_feats = torch.matmul(projector, oracle_clean_feats)
+        clean_covariance = torch.cov(clean_feats)
+        clean_mean = clean_feats.mean(dim = 1)
+
+
+    temp_feats = (temp_feats.T - clean_mean).T
+
+    # whiten the data
+    L, V = torch.linalg.eig(clean_covariance)
+    L, V = L.real, V.real
+    L = (torch.diag(L)**(1/2)+0.001).inverse()
+    normalizer = torch.matmul(V, torch.matmul( L, V.T ) )
+    temp_feats = torch.matmul(normalizer, temp_feats)
+
+    # compute QUEscore
+    taus = QUEscore(temp_feats, n_dim)
+
+    sorted_indices = np.argsort(taus)
+    n_samples = len(sorted_indices)
+
+    budget = min(budget, n_samples//2) # default assumption : at least a half of samples in each class is clean
+
+    suspicious = sorted_indices[-budget:]
+    left = sorted_indices[:n_samples-budget]
+
+    return suspicious, left
+
+from typing import Tuple, Union
+
+import numpy as np
+from scipy.special import erfc
+from sklearn.utils.extmath import randomized_svd
+from sklearn.covariance import EmpiricalCovariance
+from sklearn.utils import check_random_state
+
+
+class BeingRobust(EmpiricalCovariance):
+    """Being Robust (in High Dimensions) Can Be Practical: robust estimator of location (and potentially covariance).
+    This estimator is to be applied on Gaussian-distributed data. For other distributions some changes might be
+    required. Please check out the original paper and/or Matlab code.
+    Parameters
+    ----------
+    eps : float, optional
+        Fraction of perturbed data points, by default 0.1
+    tau : float, optional
+        Significance level, by default 0.1
+    cher : float, optional
+        Factor filter criterion, by default 2.5
+    use_randomized_svd : bool, optional
+        If True use `sklearn.utils.extmath.randomized_svd`, else use full SVD, by default True
+    debug : bool, optional
+        If True print debug information, by default False
+    assume_centered : bool
+        If True, the data is not centered beforehand, by default False
+    random_state : Union[int, np.random.RandomState],
+        Determines the pseudo random number generator for shuffling the data.
+        Pass an int for reproducible results across multiple function calls. By default none
+    keep_filtered : bool, optional
+        If True teh filtered data point are kept (`BeingRobust#filtered_`) the, by default False
+    Attributes
+    ----------
+    location_ : np.ndarray of shape (n_features,)
+        Estimated robust location.
+    filtered_ : np.ndarray of shape (?, n_features)
+        Remaining data points for estimating the mean.
+    Examples
+    --------
+    #>>> import numpy as np
+    #>>> from being_robust import BeingRobust
+    #>>> real_cov = np.array([[.8, .3], [.3, .4]])
+    #>>> rng = np.random.RandomState(0)
+    #>>> X = rng.multivariate_normal(mean=[0, 0], cov=real_cov, size=500)
+    #>>> br = BeingRobust(random_state=0, keep_filtered=True).fit(X)
+    #>>> br.location_
+    #array([0.0622..., 0.0193...])
+    #>>> br.filtered_
+    #array([[-1.6167..., -0.6431...], ...
+    """
+
+    def __init__(self,
+                 eps: float = 0.1,
+                 tau: float = 0.1,
+                 cher: float = 2.5,
+                 use_randomized_svd: bool = True,
+                 debug: bool = False,
+                 assume_centered: bool = False,
+                 random_state: Union[int, np.random.RandomState] = None,
+                 keep_filtered: bool = False):
+        super().__init__()
+        self.eps = eps
+        self.tau = tau
+        self.cher = cher
+        self.use_randomized_svd = use_randomized_svd
+        self.debug = debug
+        self.random_state = random_state
+        self.assume_centered = assume_centered
+        self.keep_filtered = keep_filtered
+
+    def fit(self, X, y=None) -> 'BeingRobust':
+        """Fits the data to obtain the robust estimate.
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data, where `n_samples` is the number of samples
+            and `n_features` is the number of features.
+        y: Ignored
+            Not used, present for API consistence purpose.
+        Returns
+        -------
+        self : BeingRobust
+        """
+        X = self._validate_data(X, ensure_min_samples=1, estimator='BeingRobust')
+        random_state = check_random_state(self.random_state)
+
+        self.location_, X = filter_gaussian_mean(X,
+                                                 eps=self.eps,
+                                                 tau=self.tau,
+                                                 cher=self.cher,
+                                                 use_randomized_svd=self.use_randomized_svd,
+                                                 debug=self.debug,
+                                                 assume_centered=self.assume_centered,
+                                                 random_state=random_state)
+        if self.keep_filtered:
+            self.filtered_ = X
+
+        return self
+
+
+def filter_gaussian_mean(X: np.ndarray,
+                         eps: float = 0.1,
+                         tau: float = 0.1,
+                         cher: float = 2.5,
+                         use_randomized_svd: bool = True,
+                         debug: bool = False,
+                         assume_centered: bool = False,
+                         random_state: int = None) -> Tuple[float, np.ndarray]:
+    """Being Robust (in High Dimensions) Can Be Practical: robust estimator of location (and potentially covariance).
+    This estimator is to be applied on Gaussian-distributed data. For other distributions some changes might be
+    required. Please check out the original paper and/or Matlab code.
+    Parameters
+    ----------
+    eps : float, optional
+        Fraction of perturbed data points, by default 0.1
+    tau : float, optional
+        Significance level, by default 0.1
+    cher : float, optional
+        Factor filter criterion, by default 2.5
+    use_randomized_svd : bool, optional
+        If True use `sklearn.utils.extmath.randomized_svd`, else use full SVD, by default True
+    debug : bool, optional
+        If True print debug information, by default False
+    assume_centered : bool
+        If True, the data is not centered beforehand, by default False
+    random_state : Union[int, np.random.RandomState],
+        Determines the pseudo random number generator for shuffling the data.
+        Pass an int for reproducible results across multiple function calls. By default none
+    Returns
+    -------
+    Tuple[float, np.ndarray]
+        The robust location estimate, the filtered version of `X`
+    """
+    n_samples, n_features = X.shape
+
+    emp_mean = X.mean(axis=0)
+
+    if assume_centered:
+        centered_X = X
+    else:
+        centered_X = (X - emp_mean) / np.sqrt(n_samples)
+
+    if use_randomized_svd:
+        U, S, Vh = randomized_svd(centered_X.T, n_components=1, random_state=random_state)
+    else:
+        U, S, Vh = np.linalg.svd(centered_X.T, full_matrices=False)
+
+    lambda_ = S[0]**2
+    v = U[:, 0]
+
+    if debug:
+        print(f'\nRecursing on X of shape {X.shape}')
+        print(f'lambda_ < 1 + 3 * eps * np.log(1 / eps) -> {lambda_} < {1 + 3 * eps * np.log(1 / eps)}')
+    if lambda_ < 1 + 3 * eps * np.log(1 / eps):
+        return emp_mean, X
+
+    delta = 2 * eps
+    if debug:
+        print(f'delta={delta}')
+
+    projected_X = X @ v
+    med = np.median(projected_X)
+    projected_X = np.abs(projected_X - med)
+    sorted_projected_X_idx = np.argsort(projected_X)
+    sorted_projected_X = projected_X[sorted_projected_X_idx]
+
+    for i in range(n_samples):
+        T = sorted_projected_X[i] - delta
+        filter_crit_lhs = n_samples - i
+        filter_crit_rhs = cher * n_samples * \
+            erfc(T / np.sqrt(2)) / 2 + eps / (n_samples * np.log(n_samples * eps / tau))
+        if filter_crit_lhs > filter_crit_rhs:
+            break
+
+    if debug:
+        print(f'filter data at index {i}')
+
+    if i == 0 or i == n_samples - 1:
+        return emp_mean, X
+
+    return filter_gaussian_mean(
+        X[sorted_projected_X_idx[:i + 1]],
+        eps=eps,
+        tau=tau,
+        cher=cher,
+        use_randomized_svd=use_randomized_svd,
+        debug=debug,
+        assume_centered=assume_centered,
+        random_state=random_state
+    )

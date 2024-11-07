@@ -6,6 +6,6 @@ __all__ = ['Kettle']
 def Kettle(args, batch_size, augmentations, mixing_method, setup, path=None):
     """Implement Main interface."""
     if args.local_rank is not None:
-        return KettleDistributed(args, batch_size, augmentations, mixing_method, setup)
+        return KettleDistributed(args, batch_size, augmentations, mixing_method, setup, path=path)
     else:
         return KettleSingle(args, batch_size, augmentations, mixing_method, setup, path=path)

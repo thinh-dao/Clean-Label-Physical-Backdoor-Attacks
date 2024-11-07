@@ -24,7 +24,7 @@ class _VictimDistributed(_VictimSingle):
         """Initialize empty victim."""
         self.args, self.num_classes, self.setup = args, num_classes, setup
         self.loss_fn = torch.nn.CrossEntropyLoss() 
-        self.rank = torch.distributed.get_rank()
+        self.local_rank = torch.distributed.get_rank()
         
         self.epoch = 1
 
@@ -47,15 +47,14 @@ class _VictimDistributed(_VictimSingle):
             self.model_init_seed = seed
             
         set_random_seed(self.model_init_seed)
-        self._initialize_model(self.args.net[0], mode=self.args.scenario)
-        self.epoch = 1
-        
+        self.model, self.defs, self.optimizer, self.scheduler = self._initialize_model(self.args.net[0], mode=self.args.scenario)
+            
         self.model.to(**self.setup)
-        if self.args.ensemble == 1:
-            self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[self.rank], output_device=self.rank)
+        if self.setup['device'] == 'cpu' and torch.cuda.device_count() > 1:
+            self.model = torch.nn.DataParallel(self.model)
             self.model.frozen = self.model.module.frozen
             
-        if self.rank == 0:
+        if self.local_rank == 0:
             write(f'{self.args.net[0]} model initialized with random key {self.model_init_seed}.', self.args.output)
             print(f'{self.args.net[0]} model initialized with random key {self.model_init_seed}.')
             write(repr(self.defs), self.args.output)
@@ -73,8 +72,8 @@ class _VictimDistributed(_VictimSingle):
             stagger_list = [max_epoch] * self.args.world_size
 
         single_setup = (self.model, self.defs, self.optimizer, self.scheduler)
-        for self.epoch in range(1, stagger_list[self.rank] + 1):
+        for self.epoch in range(1, stagger_list[self.args.local_rank] + 1):
             kettle.train_sampler.set_epoch(self.epoch)
-            run_step(kettle, poison_delta, self.epoch, *single_setup, rank=self.rank)
+            run_step(kettle, poison_delta, self.epoch, *single_setup)
             if self.args.dryrun:
                 break

@@ -1,20 +1,16 @@
 """Main class, holding information about models and training/testing routines."""
 
 import torch
-import warnings
-import os
 import random
-import copy
-from ..utils import cw_loss, write, global_meters_all_avg, ModifyTarget, CIELUVColorSpace
+
+import torch.distributed
+from ..utils import cw_loss, write, gauss_smooth, min_max_normalize
 from ..consts import NON_BLOCKING, BENCHMARK, FINETUNING_LR_DROP, NORMALIZE
 torch.backends.cudnn.benchmark = BENCHMARK
-from forest.data import datasets
 from ..victims.victim_single import _VictimSingle
 from ..victims.batched_attacks import construct_attack
 from ..victims.training import _split_data
-from PIL import Image
-from torchvision.transforms import v2
-from forest.data.datasets import data_transforms, normalize
+from forest.data.datasets import normalization
 
 
 
@@ -55,6 +51,9 @@ class _Witch():
         self.args, self.setup = args, setup
         self.retain = True if self.args.ensemble > 1 else False
         self.stat_optimal_loss = None
+        self.global_rank = None
+        if self.args.local_rank != None:
+            self.global_rank = torch.distributed.get_rank()
         
     def setup_featreg(self, victim, kettle, poison_delta=None):
         if self.args.featreg != 0:
@@ -107,7 +106,7 @@ class _Witch():
                     img += poison_delta[poison_slice, :, :, :]
                     
                 if NORMALIZE:
-                    img = normalize(img).to(**self.setup)
+                    img = normalization(img).to(**self.setup)
                 else:
                     img = img.unsqueeze(0).to(**self.setup)
                     
@@ -129,18 +128,17 @@ class _Witch():
             
     def compute_source_gradient(self, victim, kettle):
         """Implement common initialization operations for brewing."""
-        if self.args.recipe == 'label-consistent':
+        self.sources_train = torch.stack([data[0] for data in kettle.source_trainset], dim=0).to(**self.setup)
+        self.true_classes = torch.tensor([data[1] for data in kettle.source_trainset]).to(device=self.setup['device'], dtype=torch.long)
+        self.target_classes = torch.tensor([kettle.poison_setup['target_class']] * kettle.source_train_num).to(device=self.setup['device'], dtype=torch.long)
+        
+        if NORMALIZE:
+            self.sources_train = normalization(self.sources_train)
+
+        if 'gradient' not in self.args.recipe:
             self.source_grad, self.source_gnorm, self.source_clean_grad = None, None, None
         else:
             victim.eval(dropout=True)
-            
-            self.sources_train = torch.stack([data[0] for data in kettle.source_trainset], dim=0).to(**self.setup)
-            self.true_classes = torch.tensor([data[1] for data in kettle.source_trainset]).to(device=self.setup['device'], dtype=torch.long)
-            self.target_classes = torch.tensor([kettle.poison_setup['target_class']] * kettle.source_train_num).to(device=self.setup['device'], dtype=torch.long)
-            
-            if NORMALIZE:
-                self.sources_train = normalize(self.sources_train)
-                
             # Modify source grad for backdoor poisoning
             _sources = self.sources_train
             _true_classes= self.true_classes
@@ -252,8 +250,6 @@ class _Witch():
         poison_bounds = torch.zeros_like(poison_delta)
         
         self.setup_featreg(victim, kettle)
-        # featreg = self.args.featreg
-        # self.args.featreg = 0
         self.compute_source_gradient(victim, kettle)
         
         if self.args.full_data:
@@ -262,7 +258,7 @@ class _Witch():
             dataloader = kettle.poisonloader
 
         if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
-            # poison_delta.requires_grad_()
+            poison_delta.requires_grad_()
             if self.args.attackoptim in ['Adam', 'signAdam']:
                 att_optimizer = torch.optim.Adam([poison_delta], lr=self.tau0, weight_decay=0)
             else:
@@ -301,12 +297,14 @@ class _Witch():
             if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
                 if self.args.attackoptim in ['momPGD', 'signAdam']:
                     poison_delta.grad.sign_()
+                
                 att_optimizer.step()
+                
                 if self.args.scheduling:
                     scheduler.step()
                 att_optimizer.zero_grad(set_to_none=False)
                 
-                if self.args.visreg == 'soft' or self.args.visreg == 'TV+soft' or self.args.visreg == 'soft_new':
+                if self.args.visreg != None and "soft" in self.args.visreg:
                     with torch.no_grad():
                         # Projection Step
                         poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
@@ -323,9 +321,8 @@ class _Witch():
             source_losses = source_losses / (batch + 1)
             with torch.no_grad():
                 visual_losses = torch.mean(torch.linalg.matrix_norm(poison_delta))
-            feat_losses = feat_losses / (batch + 1)
+                feat_losses = feat_losses / (batch + 1)
             
-                
             if step % 10 == 0 or step == (self.args.attackiter - 1):
                 lr = att_optimizer.param_groups[0]['lr']
                 if self.target_feature != None:
@@ -433,9 +430,8 @@ class _Witch():
                 criterion = loss_fn
 
             if NORMALIZE:
-                inputs = normalize(inputs)
+                inputs = normalization(inputs)
 
-                
             closure = self._define_objective(inputs, labels, criterion, self.sources_train, self.target_classes, self.true_classes)
             loss, prediction = victim.compute(closure, self.source_grad, self.source_clean_grad, self.source_gnorm, delta_slice)
             
@@ -453,7 +449,7 @@ class _Witch():
             else:
                 raise NotImplementedError('Unknown attack optimizer.')
         else:
-            loss, feat_loss, prediction = torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0)
+            loss, feat_loss, prediction = torch.tensor(0), torch.tensor(0), torch.tensor(0)
 
         return loss.item(), feat_loss.item(), prediction.item()
 

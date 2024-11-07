@@ -8,32 +8,57 @@ import random
 import numpy as np
 import torch.nn.functional as F
 import time
+import logging
+import sys
+import torchvision.transforms.v2 as transforms
 
-from .consts import NON_BLOCKING
+from .consts import NON_BLOCKING, LOGGING_NAME
 from collections import defaultdict
 from tqdm import tqdm
 from submodlib.functions.facilityLocation import FacilityLocationFunction
 
+logger = logging.getLogger(LOGGING_NAME)
 
-os.environ["CUDA_VISIBLE_DEVICES"]="3"
 def system_startup(args=None, defs=None):
     """Decide and print GPU / CPU / hostname info."""
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     setup = dict(device=device, dtype=torch.float, non_blocking=NON_BLOCKING)
-    print(datetime.datetime.now().strftime("%A, %d. %B %Y %I:%M%p"))
-    print(f'------------------ Currently evaluating {args.recipe} ------------------')
-    
-    write(datetime.datetime.now().strftime("%A, %d. %B %Y %I:%M%p"), args.output)
-    write(f'------------------ Currently evaluating {args.recipe} ------------------', args.output)
+
+    logger.info(datetime.datetime.now().strftime("%A, %d. %B %Y %I:%M%p"))
+    logger.info(f'------------------ Currently evaluating {args.recipe} ------------------')
     
     if args is not None:
-        print(args)
-    print(f'CPUs: {torch.get_num_threads()}, GPUs: {torch.cuda.device_count()} on {socket.gethostname()}.')
+        logger.info(args)
+    logger.info(f'CPUs: {torch.get_num_threads()}, GPUs: {torch.cuda.device_count()} on {socket.gethostname()}.')
 
     if torch.cuda.is_available():
-        print(f'GPU : {torch.cuda.get_device_name(device=device)}')
+        logger.info(f'GPU : {torch.cuda.get_device_name(device=device)}')
 
     return setup
+
+def set_up_logging(output_filename, name):
+    # Clear the output file before starting
+    open(output_filename, 'w').close()
+
+    # Create a logger
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)  # Set the logger level to DEBUG
+
+    # Avoid adding handlers multiple times
+    if not logger.hasHandlers():
+        # Create file handler to log everything (DEBUG level and above)
+        file_handler = logging.FileHandler(output_filename)
+        file_handler.setLevel(logging.DEBUG)
+
+        # Create formatter for the log output
+        formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+
+        # Add the file handler and stdout handler to the logger
+    logger.addHandler(file_handler)
+    logger.addHandler(logging.StreamHandler(sys.stdout))
+
+    return logger
 
 def average_dicts(running_stats):
     """Average entries in a list of dictionaries."""
@@ -95,12 +120,6 @@ def cw_loss2(outputs, target_classes, confidence=0, clamp=-100):
     second_logit, _ = (outputs - outputs * one_hot_labels).max(dim=1)
     cw_indiv = torch.clamp(second_logit - source_logit + confidence, min=clamp)
     return cw_indiv.mean()
-
-# def total_variation_loss(img, weight=0.01):
-#     bs_img, c_img, h_img, w_img = img.size()
-#     tv_h = torch.abs(img[:,:,1:,:]-img[:,:,:-1,:]).sum()
-#     tv_w = torch.abs(img[:,:,:,1:]-img[:,:,:,:-1]).sum()
-#     return weight * (tv_h+tv_w)/(h_img * w_img * c_img * bs_img * 2)
 
 def set_random_seed(seed):
     # Setting seed
@@ -177,7 +196,6 @@ def total_variation_loss(flows,padding_mode='constant', epsilon=1e-8):
     num_pixels = flows.shape[1] * flows.shape[2] * flows.shape[3]
     loss=0
     for shifted_flow in shifted_flows:
-        # loss += torch.sum(0.299 * torch.square(flows[:, 0] - shifted_flow[:, 0]) + 0.587 * torch.square(flows[:, 1] - shifted_flow[:, 1]) + 0.114 * torch.square(flows[:, 2] - shifted_flow[:, 2]) + epsilon).cuda()
         loss += torch.mean(torch.square(flows[:, 0] - shifted_flow[:, 0]) + torch.square(flows[:, 1] - shifted_flow[:, 1]) + epsilon).cuda()
     return loss.type(torch.float32)
 
@@ -197,122 +215,10 @@ def upwind_tv(x):
     diff_up = x - x_up
 
     # Compute the TV
-    tv = 10 * (diff_right**2 + diff_left**2 + diff_down**2 + diff_up**2).mean()
+    tv = (diff_right**2 + diff_left**2 + diff_down**2 + diff_up**2).mean()
 
     return tv
 
-def upwind_tv_channel(x):
-    # x is a batch of images with shape (batch_size, channels, height, width)
-
-    # Shifted versions of the image
-    x_right = F.pad(x[:, :, :, 1:], (0, 1, 0, 0), mode='replicate')  # right shift
-    x_left = F.pad(x[:, :, :, :-1], (1, 0, 0, 0), mode='replicate')  # left shift
-    x_down = F.pad(x[:, :, 1:, :], (0, 0, 0, 1), mode='replicate')  # down shift
-    x_up = F.pad(x[:, :, :-1, :], (0, 0, 1, 0), mode='replicate')  # up shift
-
-    # Compute differences
-    diff_right = x - x_right
-    diff_left = x - x_left
-    diff_down = x - x_down
-    diff_up = x - x_up
-
-    # Compute the TV
-    tv = diff_right**2 + diff_left**2 + diff_down**2 + diff_up**2
-
-    # Sum over all pixels and channels
-    # tv = (tv[:, 0] * 0.299 + tv[:, 1] * 0.587 + tv[:, 2] * 0.114).mean()
-    tv = (tv[:, 0] * 0.299 + tv[:, 1] * 0.587 + tv[:, 2] * 0.114).mean()
-    return tv
-
-class PartialLoss(object):
-    """ Partially applied loss object. Has forward and zero_grad methods """
-    def __init__(self):
-        self.nets = []
-
-    def zero_grad(self):
-        for net in self.nets:
-            net.zero_grad()
-
-class ReferenceRegularizer(PartialLoss):
-    def __init__(self, fix_im):
-        super(ReferenceRegularizer, self).__init__()
-        self.fix_im = fix_im
-
-    def setup_attack_batch(self, fix_im):
-        """ Setup function to ensure fixed images are set
-            has been made; also zeros grads
-        ARGS:
-            fix_im: Variable (NxCxHxW) - Ground images for this minibatch
-                    SHOULD BE IN [0.0, 1.0] RANGE
-        """
-        self.fix_im = fix_im
-        self.zero_grad()
-
-
-    def cleanup_attack_batch(self):
-        """ Cleanup function to clear the fixed images after an attack batch
-            has been made; also zeros grads
-        """
-        old_fix_im = self.fix_im
-        self.fix_im = None
-        del old_fix_im
-        self.zero_grad()
-
-class SoftLInfRegularization(ReferenceRegularizer):
-    '''
-        see page 10 of this paper (https://arxiv.org/pdf/1608.04644.pdf)
-        for discussion on why we want SOFT l inf
-    '''
-    def __init__(self, fix_im, **kwargs):
-        super(SoftLInfRegularization, self).__init__(fix_im)
-
-    def forward(self, examples, *args, **kwargs):
-        # ARGS should have one element, which serves as the tau value
-
-        tau =  8.0 / 255.0  # starts at 1 each time?
-        scale_factor = 0.9
-        l_inf_dist = float(torch.max(torch.abs(examples - self.fix_im)))
-        '''
-        while scale_factor * tau > l_inf_dist:
-            tau *= scale_factor
-
-        assert tau > l_inf_dist
-        '''
-        delta_minus_taus = torch.clamp(torch.abs(examples - self.fix_im) - tau,
-                                       min=0.0)
-        batchwise = batchwise_norm(delta_minus_taus, 'inf', dim=0)
-        return batchwise.squeeze()
-
-def batchwise_norm(examples, lp, dim=0):
-    """ Returns the per-example norm of the examples, keeping along the
-        specified dimension.
-        e.g. if examples is NxCxHxW, applying this fxn with dim=0 will return a
-             N-length tensor with the lp norm of each example
-    ARGS:
-        examples : tensor or Variable -  needs more than one dimension
-        lp : string or int - either 'inf' or an int for which lp norm we use
-        dim : int - which dimension to keep
-    RETURNS:
-        1D object of same type as examples, but with shape examples.shape[dim]
-    """
-
-    assert isinstance(lp, int) or lp == 'inf'
-    examples = torch.abs(examples)
-    example_dim = examples.dim()
-    if dim != 0:
-        examples = examples.transpose(dim, 0)
-
-    if lp == 'inf':
-        for reduction in range(1, example_dim):
-            examples, _ = examples.max(1)
-        return examples
-
-    else:
-        examples = torch.pow(examples + 1e-10, lp)
-        for reduction in range(1, example_dim):
-            examples = examples.sum(1)
-        return torch.pow(examples, 1.0 / lp)
-    
 def get_subset(args, model, trainloader, num_sampled, epoch, N, indices, num_classes=10):
     trainloader = tqdm(trainloader)
 
@@ -392,7 +298,6 @@ def faciliy_location_order(c, X, y, metric, num_per_class, weights=None, optimiz
     cluster[cluster>=0] += c * num_per_class
 
     return class_indices[order], sz, greedy_time, S_time, cluster
-
 
 def get_orders_and_weights(B, X, metric, y=None, weights=None, equal_num=False, num_classes=10, optimizer="LazyGreedy"):
     '''
@@ -518,122 +423,34 @@ def get_random_subset(B, N):
 
     return subset
 
+def gauss_smooth(image: torch.Tensor, sig=6) -> torch.Tensor:
+    # Calculate kernel size based on sigma, ensuring it's odd
+    kernel_size = int(2 * (sig * 5) // 2 + 1)
+    
+    # Define GaussianBlur with calculated kernel size and sigma
+    gaussian_blur = transforms.GaussianBlur(kernel_size=kernel_size, sigma=sig)
 
-class ColorSpace(object):
+    # Apply Gaussian blur
+    blurred_image = gaussian_blur(image)
+    if image.requires_grad:
+        blurred_image.requires_grad_()
+    return blurred_image
+
+def min_max_normalize(batch):
     """
-    Base class for color spaces.
-    """
-
-    def from_rgb(self, imgs):
-        """
-        Converts an Nx3xWxH tensor in RGB color space to a Nx3xWxH tensor in
-        this color space. All outputs should be in the 0-1 range.
-        """
-        raise NotImplementedError()
-
-    def to_rgb(self, imgs):
-        """
-        Converts an Nx3xWxH tensor in this color space to a Nx3xWxH tensor in
-        RGB color space.
-        """
-        raise NotImplementedError()
-
-
-class CIEXYZColorSpace(ColorSpace):
-    """
-    The 1931 CIE XYZ color space (assuming input is in sRGB).
-
-    Warning: may have values outside [0, 1] range. Should only be used in
-    the process of converting to/from other color spaces.
-    """
-
-    def from_rgb(self, imgs):
-        # apply gamma correction
-        small_values_mask = (imgs < 0.04045).float()
-        imgs_corrected = (
-            (imgs / 12.92) * small_values_mask +
-            ((imgs + 0.055) / 1.055) ** 2.4 * (1 - small_values_mask)
-        )
-
-        # linear transformation to XYZ
-        r, g, b = imgs_corrected.permute(1, 0, 2, 3)
-        x = 0.4124 * r + 0.3576 * g + 0.1805 * b
-        y = 0.2126 * r + 0.7152 * g + 0.0722 * b
-        z = 0.0193 * r + 0.1192 * g + 0.9504 * b
-
-        return torch.stack([x, y, z], 1)
-
-    def to_rgb(self, imgs):
-        # linear transformation
-        x, y, z = imgs.permute(1, 0, 2, 3)
-        r = 3.2406 * x - 1.5372 * y - 0.4986 * z
-        g = -0.9689 * x + 1.8758 * y + 0.0415 * z
-        b = 0.0557 * x - 0.2040 * y + 1.0570 * z
-
-        imgs = torch.stack([r, g, b], 1)
-
-        # apply gamma correction
-        small_values_mask = (imgs < 0.0031308).float()
-        imgs_clamped = imgs.clamp(min=1e-10)  # prevent NaN gradients
-        imgs_corrected = (
-            (12.92 * imgs) * small_values_mask +
-            (1.055 * imgs_clamped ** (1 / 2.4) - 0.055) *
-            (1 - small_values_mask)
-        )
-
-        return imgs_corrected
-
-class CIELUVColorSpace(ColorSpace):
-    """
-    Converts to the 1976 CIE L*u*v* color space.
-    """
-
-    def __init__(self, up_white=0.1978, vp_white=0.4683, y_white=1,
-                 eps=1e-10):
-        self.xyz_cspace = CIEXYZColorSpace()
-        self.up_white = up_white
-        self.vp_white = vp_white
-        self.y_white = y_white
-        self.eps = eps
-
-    def from_rgb(self, imgs):
-        x, y, z = self.xyz_cspace.from_rgb(imgs).permute(1, 0, 2, 3)
-
-        # calculate u' and v'
-        denom = x + 15 * y + 3 * z + self.eps
-        up = 4 * x / denom
-        vp = 9 * y / denom
-
-        # calculate L*, u*, and v*
-        small_values_mask = (y / self.y_white < (6 / 29) ** 3).float()
-        y_clamped = y.clamp(min=self.eps)  # prevent NaN gradients
-        L = (
-            ((29 / 3) ** 3 * y / self.y_white) * small_values_mask +
-            (116 * (y_clamped / self.y_white) ** (1 / 3) - 16) *
-            (1 - small_values_mask)
-        )
-        u = 13 * L * (up - self.up_white)
-        v = 13 * L * (vp - self.vp_white)
-
-        return torch.stack([L / 100, (u + 100) / 200, (v + 100) / 200], 1)
-
-    def to_rgb(self, imgs):
-        L = imgs[:, 0, :, :] * 100
-        u = imgs[:, 1, :, :] * 200 - 100
-        v = imgs[:, 2, :, :] * 200 - 100
-
-        up = u / (13 * L + self.eps) + self.up_white
-        vp = v / (13 * L + self.eps) + self.vp_white
-
-        small_values_mask = (L <= 8).float()
-        y = (
-            (self.y_white * L * (3 / 29) ** 3) * small_values_mask +
-            (self.y_white * ((L + 16) / 116) ** 3) * (1 - small_values_mask)
-        )
-        denom = 4 * vp + self.eps
-        x = y * 9 * up / denom
-        z = y * (12 - 3 * up - 20 * vp) / denom
-
-        return self.xyz_cspace.to_rgb(
-            torch.stack([x, y, z], 1).clamp(0, 1.1)).clamp(0, 1)
+    Normalize a batch of images using min-max scaling for each channel.
+    
+    Args:
+        batch (Tensor): A batch of images with shape (Batch, 3, Height, Width).
         
+    Returns:
+        Tensor: Min-max normalized batch of images.
+    """
+    # Compute the min and max for each channel
+    min_vals = batch.amin(dim=(0, 2, 3), keepdim=True)
+    max_vals = batch.amax(dim=(0, 2, 3), keepdim=True)
+    
+    # Apply min-max normalization
+    normalized_batch = (batch - min_vals) / (max_vals - min_vals)
+    
+    return normalized_batch

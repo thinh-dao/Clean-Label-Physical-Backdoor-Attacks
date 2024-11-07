@@ -2,11 +2,9 @@
 from .witch_matching import WitchGradientMatching, WitchGradientMatchingNoisy, WitchGradientMatchingHidden, WitchMatchingMultiSource
 from .witch_htbd import WitchHTBD
 from .witch_clbd import WitchLabelConsistent
-from .witch_meta import WitchMetaPoison, WitchMetaPoisonHigher, WitchMetaPoison_v3
-
+from .witch_meta import WitchMetaPoison
 
 import torch
-
 
 def Witch(args, setup=dict(device=torch.device('cpu'), dtype=torch.float)):
     """Implement Main interface."""
@@ -18,10 +16,6 @@ def Witch(args, setup=dict(device=torch.device('cpu'), dtype=torch.float)):
         return WitchGradientMatchingHidden(args, setup)
     elif args.recipe == 'meta':
         return WitchMetaPoison(args, setup)
-    elif args.recipe == 'meta-v2':
-        return WitchMetaPoisonHigher(args, setup)
-    elif args.recipe == 'meta-v3':
-        return WitchMetaPoison_v3(args, setup)
     elif args.recipe == 'gradient-matching-mt':
         return WitchMatchingMultiSource(args, setup)
     elif args.recipe == 'hidden-trigger':
