@@ -31,6 +31,13 @@ data_transforms = {
     ]),
 }
 
+stats = {
+    'Facial_recognition': {
+        'mean': [0.5508784055709839, 0.458417683839798, 0.417265921831131] ,
+        'std': [0.24289922416210175, 0.22884903848171234, 0.23412548005580902]
+    },
+}
+
 def pil_loader(path: str) -> Image.Image:
     # Open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
     with open(path, "rb") as f:
@@ -538,8 +545,9 @@ class FaceDetector:
         for idx, (img, _, image_id) in enumerate(self.dataset):
             landmarks = self.get_landmarks(img)
             
-            if len(landmarks) == 0:
-                print('Faulty image: ', idx)
+            if len(landmarks) == 0 or self.args.random_placement:
+                if self.args.constrain_perturbation:
+                    self.dataset_face_overlay[idx] = torch.ones((224, 224))
                 
                 if self.patch_trigger != None:
                     new_height = int(self.trigger_img.shape[0] * 50 / self.trigger_img.shape[1])
