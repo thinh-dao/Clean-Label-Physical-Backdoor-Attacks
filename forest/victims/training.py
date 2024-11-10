@@ -139,7 +139,7 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
         loss, preds = criterion(outputs, labels)
             
         correct_preds += preds
-        epoch_loss += loss.item() * inputs.shape[0]
+        epoch_loss += loss.item()
         total_preds += labels.shape[0]
         
         differentiable_params = [p for p in model.parameters() if p.requires_grad]
@@ -203,7 +203,7 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
 
     current_lr = optimizer.param_groups[0]['lr']
     
-    train_loss = epoch_loss / total_preds
+    train_loss = epoch_loss / len(train_loader)
     train_acc = correct_preds / total_preds
     
     print_and_save_stats(epoch, current_lr, train_loss, train_acc, predictions, source_adv_acc, source_adv_loss, source_clean_acc, source_clean_loss, suspicion_rate, false_positive_rate, output=kettle.args.output)

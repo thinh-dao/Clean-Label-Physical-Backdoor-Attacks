@@ -32,25 +32,25 @@ class WitchMetaPoison(_Witch):
         def closure(model, optimizer, *args):
             """This function will be evaluated on all GPUs."""  # noqa: D401
             # Wrap the model into a meta-object that allows for meta-learning steps via monkeypatching:
-            model = MetaMonkey(copy.deepcopy(model))
+            poisoned_model = MetaMonkey(copy.deepcopy(model))
 
             for _ in range(self.args.nadapt):
-                outputs = model(inputs, model._parameters)
+                outputs = poisoned_model(inputs, poisoned_model._parameters)
                 prediction = (outputs.data.argmax(dim=1) == labels).sum()
 
                 poison_loss = criterion(outputs, labels)
-                poison_grad = torch.autograd.grad(poison_loss, model._parameters.values(),
+                poison_grad = torch.autograd.grad(poison_loss, poisoned_model._parameters.values(),
                                                   retain_graph=True, create_graph=True, only_inputs=True)
 
                 current_lr = optimizer.param_groups[0]['lr']
-                model._parameters = OrderedDict((name, param - current_lr * grad_part)
-                                               for ((name, param), grad_part) in zip(model._parameters.items(), poison_grad))
+                poisoned_model._parameters = OrderedDict((name, param - current_lr * grad_part)
+                                               for ((name, param), grad_part) in zip(poisoned_model._parameters.items(), poison_grad))
             
             batch_size = 32 
             outputs = []
 
             for i in range(0, len(sources), batch_size):
-                source_outs = model(sources[i:i+batch_size], model._parameters)
+                source_outs = poisoned_model(sources[i:i+batch_size], poisoned_model._parameters)
                 outputs.extend(source_outs)
             
             source_outs = torch.stack(outputs).to(**self.setup)
