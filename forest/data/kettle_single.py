@@ -263,7 +263,7 @@ class KettleSingle():
             visreg = self.args.visreg
         
         net = ','.join(self.args.net)
-        path = os.path.join(self.args.poison_path, mode, self.args.poisonkey, self.args.trigger, visreg, net, f'{self.args.model_seed}_{self.args.poison_seed}_{self.args.eps}_{self.args.recipe}')
+        path = os.path.join(self.args.poison_path, self.args.dataset, mode, self.args.poisonkey, self.args.trigger, visreg, net, f'{self.args.model_seed}_{self.args.poison_seed}_{self.args.eps}_{self.args.recipe}')
         os.makedirs(path, exist_ok=True)
         
         dm = torch.tensor(self.trainset.data_mean)[:, None, None]
@@ -696,7 +696,7 @@ class KettleSingle():
         
         # Parse threat model
         self.extract_poisonkey()
-        if self.args.dataset != 'animal_classification':
+        if self.args.dataset != 'Animal_classification':
             print("Get class distribution of suspicionset")
             self.setup_suspicionset() # Set up suspicionset and false positive set
         self.poison_setup = self.parse_threats() # Return a dictionary of poison_budget, source_num, poison_class, source_class, target_class
@@ -707,8 +707,9 @@ class KettleSingle():
         dist = dict()
         for i in dataset.class_to_idx.values(): 
             dist[i] = []
-        for _, target, idx in dataset:  
-            dist[target].append(idx)
+        for idx in range(len(dataset)):  
+            target, index= dataset.get_target(idx)
+            dist[target].append(index)
         return dist
     
     def extract_poisonkey(self):

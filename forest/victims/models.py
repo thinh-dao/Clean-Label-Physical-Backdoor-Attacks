@@ -5,7 +5,7 @@ import torch.nn as nn
 import math
 import os
 from torch.nn import functional as F
-from torchvision.models import resnet50, ResNet50_Weights
+from torchvision.models import resnet50, resnet18, vgg11, ResNet50_Weights, ResNet18_Weights, VGG11_Weights
 
 from torchvision import models
 from torchvision.models.resnet import BasicBlock, Bottleneck
@@ -24,6 +24,13 @@ def get_model(model_name, num_classes=10, pretrained=True):
         model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
         num_ftrs = model.fc.in_features
         model.fc = nn.Linear(in_features=num_ftrs, out_features=num_classes)   
+    elif model_name.lower() == 'resnet18_imagenet':
+        model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(in_features=num_ftrs, out_features=num_classes) 
+    elif model_name.lower() == 'vgg11_imagenet':
+        model = vgg11(weights=VGG11_Weights.IMAGENET1K_V1)
+        model.classifier[-1] = nn.Linear(in_features=4096, out_features=num_classes)
     elif model_name.lower() == 'vgg16':  
         if pretrained:
             model = vgg_face_dag(weights_path='pretrained/vgg_face_dag.pth')

@@ -363,8 +363,8 @@ class CachedDataset(torch.utils.data.Dataset):
         print('Caching started ...')
         batch_size = min(len(dataset) // max(num_workers, 1), 8192)
         cacheloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size,
-                                                  shuffle=False, drop_last=False, num_workers=num_workers,
-                                                  pin_memory=False)
+                                                shuffle=False, drop_last=False, num_workers=num_workers,
+                                                pin_memory=False)
 
         # Allocate memory:
         self.cache = torch.empty((len(self.dataset), *self.dataset[0][0].shape), pin_memory=PIN_MEMORY)

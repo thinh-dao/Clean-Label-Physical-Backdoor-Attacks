@@ -63,7 +63,7 @@ if __name__ == "__main__":
     num_classes = len(os.listdir(os.path.join("datasets", args.dataset, 'train')))
     model = forest.Victim(args, num_classes=NUM_CLASSES, setup=setup) # Initialize model and loss_fn
     data = forest.Kettle(args, model.defs.batch_size, model.defs.augmentations,
-                         model.defs.mixing_method, setup=setup) # Set up trainloader, validloader, poisonloader, poison_ids, trainset/poisonset/source_testset
+                        model.defs.mixing_method, setup=setup) # Set up trainloader, validloader, poisonloader, poison_ids, trainset/poisonset/source_testset
     witch = forest.Witch(args, setup=setup)
 
     start_time = time.time()

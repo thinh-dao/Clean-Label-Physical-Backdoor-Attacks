@@ -96,7 +96,7 @@ class WitchHTBD(_Witch):
                     scheduler.step()
                 att_optimizer.zero_grad(set_to_none=False)
                 
-                if self.args.visreg == None and "soft" in self.args.visreg:
+                if self.args.visreg != None and "soft" in self.args.visreg:
                     with torch.no_grad():
                         # Projection Step
                         poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
