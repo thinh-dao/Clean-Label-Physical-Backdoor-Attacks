@@ -5,10 +5,10 @@ import os
 import copy
 import bisect
 import torchvision
-import dlib
 import matplotlib.pyplot as plt
-import cv2
-from imutils import face_utils
+# import dlib
+# import cv2
+# from imutils import face_utils
 torchvision.disable_beta_transforms_warning()
 from torchvision.transforms import v2 as transforms
 from PIL import Image

@@ -7,7 +7,7 @@ import copy
 from collections import OrderedDict
 
 from ..utils import cw_loss, write
-from ..consts import BENCHMARK, NON_BLOCKING, NORMALIZE, FINETUNING_LR_DROP
+from ..consts import BENCHMARK
 from forest.data.datasets import normalization
 from ..victims.training import _split_data
 torch.backends.cudnn.benchmark = BENCHMARK
@@ -32,30 +32,77 @@ class WitchMetaPoison(_Witch):
         def closure(model, optimizer, *args):
             """This function will be evaluated on all GPUs."""  # noqa: D401
             # Wrap the model into a meta-object that allows for meta-learning steps via monkeypatching:
-            poisoned_model = MetaMonkey(copy.deepcopy(model))
+            model = MetaMonkey(model)
 
             for _ in range(self.args.nadapt):
-                outputs = poisoned_model(inputs, poisoned_model._parameters)
+                outputs = model(inputs, model._parameters)
                 prediction = (outputs.data.argmax(dim=1) == labels).sum()
 
                 poison_loss = criterion(outputs, labels)
-                poison_grad = torch.autograd.grad(poison_loss, poisoned_model._parameters.values(),
+                poison_grad = torch.autograd.grad(poison_loss, model._parameters.values(),
                                                   retain_graph=True, create_graph=True, only_inputs=True)
 
                 current_lr = optimizer.param_groups[0]['lr']
-                poisoned_model._parameters = OrderedDict((name, param - current_lr * grad_part)
-                                               for ((name, param), grad_part) in zip(poisoned_model._parameters.items(), poison_grad))
-            
-            batch_size = 32 
-            outputs = []
-
-            for i in range(0, len(sources), batch_size):
-                source_outs = poisoned_model(sources[i:i+batch_size], poisoned_model._parameters)
-                outputs.extend(source_outs)
-            
-            source_outs = torch.stack(outputs).to(**self.setup)
+                model._parameters = OrderedDict((name, param - current_lr * grad_part)
+                                               for ((name, param), grad_part) in zip(model._parameters.items(), poison_grad))
+            # model.eval()
+            source_outs = model(sources, model.parameters)
             source_loss = criterion(source_outs, target_classes)
             source_loss.backward(retain_graph=self.retain)
 
             return source_loss.detach().cpu(), prediction.detach().cpu()
+        return closure
+
+class WitchMetaPoisonHigher(_Witch):
+    """Reimplementation of metapoison using the "higher" library."""
+
+    def _define_objective(self, inputs, labels, criterion, sources, target_classes, *args):
+        def closure(model, optimizer, *args):
+            """This function will be evaluated on all GPUs."""  # noqa: D401
+            # Wrap the model into a meta-object that allows for meta-learning steps via monkeypatching:
+            with higher.innerloop_ctx(model, optimizer, copy_initial_weights=False) as (fmodel, fopt):
+                for _ in range(self.args.nadapt):
+                    outputs = fmodel(inputs)
+                    poison_loss = criterion(outputs, labels)
+
+                    fopt.step(poison_loss)
+
+            prediction = (outputs.data.argmax(dim=1) == labels).sum()
+            # model.eval()
+            source_loss = criterion(fmodel(sources), target_classes)
+            source_loss.backward(retain_graph=self.retain)
+
+            return source_loss.detach().cpu(), prediction.detach().cpu()
+
+        return closure
+
+class WitchMetaPoison_v3(_Witch):
+    """Reimplementation of metapoison using the "higher" library.
+
+    This version also implements the "shared-batch" between source and inputs.
+    """
+
+    def _define_objective(self, inputs, labels, criterion, sources, target_classes, *args):
+        def closure(model, optimizer, *args):
+            """This function will be evaluated on all GPUs."""  # noqa: D401
+            list(model.children())[-1].train() if model.frozen else model.train()
+            batch_size = inputs.shape[0]
+
+            data = torch.cat((inputs, sources), dim=0)
+
+            # Wrap the model into a meta-object that allows for meta-learning steps via monkeypatching:
+            with higher.innerloop_ctx(model, optimizer, copy_initial_weights=False) as (fmodel, fopt):
+                for _ in range(self.args.nadapt):
+                    outputs = fmodel(data)
+                    poison_loss = criterion(outputs[:batch_size], labels)
+
+                    fopt.step(poison_loss)
+
+            prediction = (outputs[:batch_size].data.argmax(dim=1) == labels).sum()
+
+            source_loss = criterion(outputs[batch_size:], target_classes)
+            source_loss.backward(retain_graph=self.retain)
+
+            return source_loss.detach().cpu(), prediction.detach().cpu()
+
         return closure

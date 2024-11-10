@@ -10,6 +10,7 @@ import os
 import random
 import PIL
 import copy
+import pickle
 
 from ..utils import write, set_random_seed
 
@@ -68,6 +69,12 @@ class KettleSingle():
         self.validloader = torch.utils.data.DataLoader(self.validset, batch_size=self.batch_size,
                                                        shuffle=False, drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
         
+
+        self.defenseset = None
+        if args.defense == 'strip':
+            num_defense = int(args.clean_budget * len(self.validset))
+            defense_indices = random.sample(range(len(self.validset)), num_defense)
+            self.defenseset = Subset(dataset=self.validset, indices=defense_indices)
 
         self.prepare_diff_data_augmentations(normalize=NORMALIZE) # Create self.dm, self.ds, self.augment
         
@@ -282,12 +289,8 @@ class KettleSingle():
             poison_slice = self.poison_lookup.get(idx)
             if (poison_slice is not None) and train:
                 perturbation = poison_delta[poison_slice, :, :, :]
-
-                max_vals_per_channel = torch.amax(input.abs(), dim=(0))
-                relative_mask = input.abs() / max_vals_per_channel[None, :, :]
-                perturbation.data *= relative_mask
-
                 input += perturbation
+
                 if self.args.recipe == 'label-consistent': 
                     self.face_detector.patch_image(input, poison_slice)                                     
             _torch_to_PIL(input).save(filename)
@@ -428,26 +431,24 @@ class KettleSingle():
         self.trigger_target_ids = []
         self.poison_target_ids = []
         self.poison_num = 0
-        self.bonus_num = 0
         self.poisonset = None
         
         if self.args.recipe == 'naive':
             target_class = self.poison_setup['target_class']
-            self.bonus_num = ceil(self.args.alpha * len(self.trainset_dist[target_class]))  
-            if self.bonus_num > len(self.triggerset_dist[target_class]):
-                self.bonus_num = len(self.triggerset_dist[target_class])
-                self.args.alpha = self.bonus_num/len(self.trainset_dist[target_class])
+            self.poison_num = ceil(self.args.alpha / (1-self.args.alpha) * len(self.trainset_dist[target_class]))  
+            if self.poison_num > len(self.triggerset_dist[target_class]):
+                self.poison_num = len(self.triggerset_dist[target_class])
             
-            write("Add {} images of target class with physical trigger to training set.".format(self.bonus_num), self.args.output)
+            write("Add {} images of target class with physical trigger to training set.".format(self.poison_num), self.args.output)
             
-            # Sample bonus_num from target-class data of trigger trainset
-            bonus_indices = random.sample(self.triggerset_dist[target_class], self.bonus_num)          
-            self.target_triggerset = Subset(self.triggerset, bonus_indices, transform=copy.deepcopy(self.trainset.transform))
+            # Sample poison_num from target-class data of trigger trainset
+            poison_indices = random.sample(self.triggerset_dist[target_class], self.poison_num)          
+            self.target_triggerset = Subset(self.triggerset, poison_indices, transform=copy.deepcopy(self.trainset.transform))
             
             # Overwrite trainset
             self.trainset = ConcatDataset([self.trainset, self.target_triggerset])  
-            self.trainset_dist = self.class_distribution(self.trainset)
-            self.poison_target_ids = list(range(len(self.trainset)-self.bonus_num, len(self.trainset)))
+            self.poison_target_ids = list(range(len(self.trainset)-self.poison_num, len(self.trainset)))
+            self.trainset_dist[target_class] = self.trainset_dist[target_class] + self.poison_target_ids
             self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True,
                 drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
         else:
@@ -472,7 +473,7 @@ class KettleSingle():
                 poison_target_ids = torch.tensor(poison_target_ids, dtype=torch.long)
                     
                 if self.args.poison_selection_strategy == 'random':
-                    self.poison_num += ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
+                    self.poison_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
                     indices = random.sample(list(range(len(poison_target_ids))), self.poison_num)
                     
                 elif self.args.poison_selection_strategy == 'cross_margin':
@@ -486,7 +487,7 @@ class KettleSingle():
                             feature = featract(img.unsqueeze(0)).detach().cpu().numpy().squeeze()
                             distances.append(self.cosine_cluster_distances(feature, trigger_source_poi))
 
-                    self.poison_num += ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
+                    self.poison_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
                     indices = [i[0] for i in sorted(enumerate(distances), key=lambda x:x[1])][:self.poison_num]
                 
                 elif self.args.poison_selection_strategy == 'cosine_distance':
@@ -516,8 +517,8 @@ class KettleSingle():
                             img = image.to(**self.setup)
                             feature = featract(img.unsqueeze(0)).detach().cpu().numpy().squeeze()
                             distances.append(self.cosine_cluster_distances(feature, trigger_source_poi) - self.cosine_cluster_distances(feature, untrigger_target_poi))
-
-                    self.poison_num += ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
+                            
+                    self.poison_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
                     indices = [i[0] for i in sorted(enumerate(distances), key=lambda x:x[1])][:self.poison_num]
                     
                 elif self.args.poison_selection_strategy == 'inner_product':
@@ -547,8 +548,8 @@ class KettleSingle():
                             img = image.to(**self.setup)
                             feature = featract(img.unsqueeze(0)).detach().cpu().numpy().squeeze()
                             distances.append(self.inner_product_distances(feature, trigger_source_poi) - self.inner_product_distances(feature, untrigger_target_poi))
-
-                    self.poison_num += ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
+                            
+                    self.poison_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
                     indices = [i[0] for i in sorted(enumerate(distances), key=lambda x:x[1])][:self.poison_num]
                 
                 elif self.args.poison_selection_strategy == 'max_loss':
@@ -566,8 +567,8 @@ class KettleSingle():
                             output = model(img)
                             loss = criterion(output, label)
                             losses.append(loss)
-
-                    self.poison_num += ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
+                            
+                    self.poison_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
                     indices = [i[0] for i in sorted(enumerate(losses), key=lambda x:x[1])][-self.poison_num:]
                     
                 elif self.args.poison_selection_strategy == 'max_gradient':
@@ -605,7 +606,7 @@ class KettleSingle():
                         write(f'Taking average gradient norm of ensemble of {len(victim.models)} models', self.args.output)
                         grad_norms = [sum(col) / float(len(col)) for col in zip(*grad_norms_list)]
                     
-                    self.poison_num += ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
+                    self.poison_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
                     indices = [i[0] for i in sorted(enumerate(grad_norms), key=lambda x:x[1])][-self.poison_num:]
 
                 elif self.args.poison_selection_strategy == 'max_gradient_product':
@@ -630,7 +631,7 @@ class KettleSingle():
                         
                         losses.append(loss)
 
-                    self.poison_num += ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
+                    self.poison_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
                     indices = [i[0] for i in sorted(enumerate(losses), key=lambda x:x[1])][:self.poison_num]
                 else:
                     raise NotImplementedError('Poison selection {} strategy is not implemented yet!'.format(self.args.poison_selection_strategy))
@@ -668,18 +669,35 @@ class KettleSingle():
          - poison_setup / poisonset / source_testset / validset / source_trainset
 
         """ 
-        triggerset_path = os.path.join("datasets",self.args.dataset, 'trigger', self.args.trigger)
+        print("Setup triggerset")
+        triggerset_path = os.path.join("datasets", self.args.dataset, 'trigger', self.args.trigger)
         self.triggerset = TriggerSet(root=triggerset_path, trainset_class_to_idx=self.trainset_class_to_idx)
         self.triggerset_classes = self.triggerset.classes
         self.triggerset_class_ids = list(self.triggerset.class_to_idx.values())
         
         # Set up dataset and triggerset distribution
-        self.trainset_dist = self.class_distribution(self.trainset)
-        self.triggerset_dist = self.class_distribution(self.triggerset)
+        print("Get class distribution of trainset")
+        
+        if os.path.exists(f'{self.args.dataset}_trainset_dict.pkl'):
+            with open(f'{self.args.dataset}_trainset_dict.pkl', 'rb') as f:
+                self.trainset_dist = pickle.load(f)
+        else:
+            self.trainset_dist = self.class_distribution(self.trainset)
+            with open(f'{self.args.dataset}_trainset_dict.pkl', 'wb') as f:
+                pickle.dump(self.trainset_dist, f)
+            
+        if os.path.exists(f'{self.args.dataset}_{self.args.trigger}_dict.pkl'):
+            with open(f'{self.args.dataset}_{self.args.trigger}_dict.pkl', 'rb') as f:
+                self.triggerset_dist = pickle.load(f)
+        else:
+            self.triggerset_dist = self.class_distribution(self.triggerset)
+            with open(f'{self.args.dataset}_{self.args.trigger}_dict.pkl', 'wb') as f:
+                pickle.dump(self.triggerset_dist, f)
         
         # Parse threat model
         self.extract_poisonkey()
         if self.args.dataset != 'animal_classification':
+            print("Get class distribution of suspicionset")
             self.setup_suspicionset() # Set up suspicionset and false positive set
         self.poison_setup = self.parse_threats() # Return a dictionary of poison_budget, source_num, poison_class, source_class, target_class
         self.setup_poisons() # Set up source trainset and source testset
@@ -838,3 +856,4 @@ class KettleSingle():
             inputs: [batch, 3, 224, 224]: Batch of inputs to be patched
         """
         self.face_detector.patch_inputs(inputs, batch_positions, poison_slices)
+        

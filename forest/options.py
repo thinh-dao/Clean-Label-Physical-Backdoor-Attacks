@@ -130,19 +130,19 @@ def options():
     
     # Distributed Computations
     parser.add_argument("--local_rank", default=None, type=int, help='Distributed rank. This is an INTERNAL ARGUMENT! '
-                                                                     'Only the launch utility should set this argument!')
+                                                                    'Only the launch utility should set this argument!')
 
     # Backdoor attack:
     parser.add_argument('--keep_sources', action='store_true', default=True, help='Do we keep the sources are used for testing attack success rate?')
-    parser.add_argument('--sources_train_rate', default=1.0, type=float, help='Fraction of source_class trainset that can be selected crafting poisons')
-    parser.add_argument('--sources_selection_rate', default=1.0, type=int, help='Fraction of sources to be selected for crafting poisons')
+    parser.add_argument('--sources_train_rate', default=0.75, type=float, help='Fraction of source_class trainset that can be selected crafting poisons')
+    parser.add_argument('--sources_selection_rate', default=1.0, type=float, help='Fraction of sources to be selected for calculating source_grad in gradient-matching')
     parser.add_argument('--source_gradient_batch', default=64, type=int, help='Batch size for sources train gradient computing')
-    parser.add_argument('--val_max_epoch', default=40, type=int, help='Train only up to this epoch for final validation.')
+    parser.add_argument('--val_max_epoch', default=20, type=int, help='Train only up to this epoch for final validation.')
     parser.add_argument('--retrain_max_epoch', default=20, type=int, help='Train only up to this epoch for retraining during crafting.')
     parser.add_argument('--retrain_scenario', default=None, type=str, choices=['from-scratch', 'finetuning', 'transfer'], help='Scenario for retraining and evaluating on the poisoned dataset')
     parser.add_argument('--load_feature_repr', default=True, action='store_true', help='Load feature representation of the model trained on clean data')
     parser.add_argument('--train_from_scratch', default=False, action='store_true', help='Train model from scratch')
-    parser.add_argument('--trigger', default='real_beard', type=str, help='Trigger type')
+    parser.add_argument('--trigger', default='sunglasses', type=str, help='Trigger type')
     parser.add_argument('--digital_train', action='store_true', default=False, help='Adding digital trigger instead of physical ones during training')
     parser.add_argument('--digital_test', action='store_true', default=False, help='Adding digital trigger instead of physical ones during inference')
     parser.add_argument('--digital_trigger_path', default='digital_triggers')

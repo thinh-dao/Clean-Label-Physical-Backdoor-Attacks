@@ -288,7 +288,7 @@ class _VictimSingle(_VictimBase):
                     warnings.warn(f'Batch size changed to {batch_size} to fit source train size')
             gradients = None
             for i in range(images.shape[0]//batch_size):
-                loss = self.args.scale * batch_size * criterion(self.model(images[i*batch_size:(i+1)*batch_size]), labels[i*batch_size:(i+1)*batch_size])
+                loss = batch_size * criterion(self.model(images[i*batch_size:(i+1)*batch_size]), labels[i*batch_size:(i+1)*batch_size])
                 if i == 0:
                     gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
                 else:

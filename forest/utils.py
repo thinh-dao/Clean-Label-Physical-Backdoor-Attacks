@@ -12,27 +12,28 @@ import logging
 import sys
 import torchvision.transforms.v2 as transforms
 
-from .consts import NON_BLOCKING, LOGGING_NAME
+from .consts import NON_BLOCKING
 from collections import defaultdict
 from tqdm import tqdm
 from submodlib.functions.facilityLocation import FacilityLocationFunction
 
-logger = logging.getLogger(LOGGING_NAME)
-
+os.environ["CUDA_VISIBLE_DEVICES"]="3"
 def system_startup(args=None, defs=None):
     """Decide and print GPU / CPU / hostname info."""
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     setup = dict(device=device, dtype=torch.float, non_blocking=NON_BLOCKING)
-
-    logger.info(datetime.datetime.now().strftime("%A, %d. %B %Y %I:%M%p"))
-    logger.info(f'------------------ Currently evaluating {args.recipe} ------------------')
+    print(datetime.datetime.now().strftime("%A, %d. %B %Y %I:%M%p"))
+    print(f'------------------ Currently evaluating {args.recipe} ------------------')
+    
+    write(datetime.datetime.now().strftime("%A, %d. %B %Y %I:%M%p"), args.output)
+    write(f'------------------ Currently evaluating {args.recipe} ------------------', args.output)
     
     if args is not None:
-        logger.info(args)
-    logger.info(f'CPUs: {torch.get_num_threads()}, GPUs: {torch.cuda.device_count()} on {socket.gethostname()}.')
+        print(args)
+    print(f'CPUs: {torch.get_num_threads()}, GPUs: {torch.cuda.device_count()} on {socket.gethostname()}.')
 
     if torch.cuda.is_available():
-        logger.info(f'GPU : {torch.cuda.get_device_name(device=device)}')
+        print(f'GPU : {torch.cuda.get_device_name(device=device)}')
 
     return setup
 
