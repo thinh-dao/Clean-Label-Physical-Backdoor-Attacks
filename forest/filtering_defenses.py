@@ -255,7 +255,7 @@ def _NeuralCleanse(kettle, victim, poison_delta, args, num_classes=10):
 def _Scan(kettle, victim, poison_delta, args, num_classes=10):
     kwargs = {'num_workers': 3, 'pin_memory': True}
 
-    inspection_set = PoisonSet(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalization=NORMALIZE)
+    inspection_set = PoisonSet(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE)
     # main dataset we aim to cleanse
     inspection_split_loader = torch.utils.data.DataLoader(
         inspection_set,
@@ -578,7 +578,7 @@ def _Spectre(kettle, victim, poison_delta, args, num_classes=10):
     feats, class_indices = _get_poisoned_features(kettle, victim, poison_delta, dryrun=kettle.args.dryrun)
     clean_feats, clean_class_indices = _get_cleaned_features(kettle, victim, dryrun=kettle.args.dryrun)
     suspicious_indices = []
-    raw_poison_rate = args.alpha +args.beta
+    raw_poison_rate = args.alpha
     budget = int(raw_poison_rate * len(kettle.trainset_dist[kettle.poison_setup['poison_class']]) * 1.5)
 
     max_dim = 2 # 64

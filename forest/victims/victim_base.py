@@ -130,6 +130,7 @@ class _VictimBase:
         """Clean (pre)-training of the chosen model, no poisoning involved."""
             
         write('Starting clean training with {} scenario ...'.format(self.args.scenario), self.args.output)
+        print('Starting clean training with {} scenario ...'.format(self.args.scenario))
         
         if self.args.recipe == 'label-consistent' and 'resnet' in self.args.net:
             save_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_robust.pth")

@@ -89,7 +89,7 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler, los
         if times_selected != None:
             times_selected[ids] += 1
         # Prep Mini-Batch
-        optimizer.zero_grad(set_to_none=False)
+        optimizer.zero_grad()
             
         #### Add poison pattern to data #####
         if poison_delta is not None:

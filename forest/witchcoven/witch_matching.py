@@ -116,7 +116,8 @@ class WitchGradientMatching(_Witch):
         elif self.args.visreg == 'soft_l_inf':
             max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
             relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
-            regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean()
+            # regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean()
+            regularized_loss = torch.clamp(perturbations.abs() - tau, min=0.0).mean()
         elif self.args.visreg == 'TV+soft_l_inf':
             max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
             relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
@@ -124,7 +125,8 @@ class WitchGradientMatching(_Witch):
         elif self.args.visreg == 'UTV+soft_l_inf':
             max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
             relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
-            regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean() + 5 * upwind_tv(perturbations)
+            # regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean() + 5 * upwind_tv(perturbations)
+            regularized_loss = torch.clamp(perturbations.abs() - tau, min=0.0).mean() + 5 * upwind_tv(perturbations)
         else:
             if self.args.visreg != None:
                 raise ValueError(f"{self.args.visreg} regularization not defined")

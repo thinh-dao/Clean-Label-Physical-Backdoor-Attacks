@@ -167,7 +167,6 @@ class KettleDistributed(KettleSingle):
             if self.args.poison_triggered_sample: raise ValueError('Triggered sample requires beta > 0.0')
         
         # Set up initial values 
-        self.trigger_target_ids = []
         self.poison_target_ids = []
         self.poison_num = 0
         self.poisonset = None
@@ -194,7 +193,6 @@ class KettleDistributed(KettleSingle):
                 rank=self.local_rank,
             )
             
-            self.trigger_target_ids = list(range(len(self.trainset)-self.bonus_num, len(self.trainset)))
             self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size, sampler=train_sampler,
                                                         drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
             
@@ -301,5 +299,5 @@ class KettleDistributed(KettleSingle):
             
             self.poison_lookup = dict(zip(self.poison_target_ids, range(self.poison_num)))
             
-        self.clean_ids = [idx for idx in range(len(self.trainset)) if (idx not in self.poison_target_ids) and (idx not in self.trigger_target_ids)]
+        self.clean_ids = [idx for idx in range(len(self.trainset)) if (idx not in self.poison_target_ids)]
         

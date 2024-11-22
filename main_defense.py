@@ -1,5 +1,7 @@
 """General interface script to launch poisoning jobs."""
 
+"""General interface script to launch poisoning jobs."""
+
 import torch
 import os
 
@@ -7,15 +9,21 @@ import datetime
 import time
 
 import forest
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 from forest.filtering_defenses import get_defense
 from forest.firewall_defenses import get_firewall
 from forest.utils import write, set_random_seed
-from forest.consts import BENCHMARK, NUM_CLASSES
+from forest.consts import BENCHMARK, SHARING_STRATEGY
+
 torch.backends.cudnn.benchmark = BENCHMARK
+torch.multiprocessing.set_sharing_strategy(SHARING_STRATEGY)
 
 # Parse input arguments
 args = forest.options().parse_args()
+if args.recipe == 'naive' or args.recipe == 'label-consistent': 
+    args.threatmodel = 'clean-multi-source'
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   # see issue #152
 os.environ["CUDA_VISIBLE_DEVICES"]=args.devices
@@ -27,13 +35,8 @@ if args.exp_name is None:
     exp_num = len(os.listdir(os.path.join(os.getcwd(), 'outputs'))) + 1
     args.exp_name = f'exp_{exp_num}'
 
-if args.defense == '':
-    args.output = f'defense_output/{args.exp_name}/{args.recipe}/{args.scenario}/{args.trigger}/{args.net[0].upper()}/{args.poisonkey}_{args.scenario}_{args.trigger}_{args.alpha}_{args.beta}_{args.eps}_{args.attackoptim}_{args.attackiter}.txt'
-else:
-    args.output = f'defense_output/{args.exp_name}/{args.defense}/{args.recipe}/{args.scenario}/{args.trigger}/{args.net[0].upper()}/{args.poisonkey}_{args.scenario}_{args.trigger}_{args.alpha}_{args.beta}_{args.attackoptim}_{args.attackiter}.txt'
-
-print(args.output)
-
+args.output = f'outputs/{args.exp_name}/{args.recipe}/{args.trigger}/{args.net[0].upper()}/{args.poisonkey}_{args.trigger}_{args.alpha}_{args.eps}_{args.attackoptim}_{args.attackiter}.txt'
+print("Output is logged in", args.output)
 os.makedirs(os.path.dirname(args.output), exist_ok=True)
 open(args.output, 'w').close() # Clear the output files
 
@@ -45,10 +48,10 @@ if __name__ == "__main__":
     
     setup = forest.utils.system_startup(args) # Set up device and torch data type
     
-    num_classes = len(os.listdir(os.path.join("datasets", args.dataset, 'train')))
-    model = forest.Victim(args, num_classes=NUM_CLASSES, setup=setup) # Initialize model and loss_fn
+    num_classes = len(os.listdir(os.path.join("datasets",args.dataset, 'train')))
+    model = forest.Victim(args, num_classes=num_classes, setup=setup) # Initialize model and loss_fn
     data = forest.Kettle(args, model.defs.batch_size, model.defs.augmentations,
-                         model.defs.mixing_method, setup=setup) # Set up trainloader, validloader, poisonloader, poison_ids, trainset/poisonset/source_testset
+                        model.defs.mixing_method, setup=setup) # Set up trainloader, validloader, poisonloader, poison_ids, trainset/poisonset/source_testset
     witch = forest.Witch(args, setup=setup)
 
     start_time = time.time()
@@ -59,7 +62,7 @@ if __name__ == "__main__":
         
     train_time = time.time()
     print("Train time: ", str(datetime.timedelta(seconds=train_time - start_time)))
-    
+                
     # Select poisons based on maximum gradient norm
     data.select_poisons(model)
     
@@ -73,14 +76,17 @@ if __name__ == "__main__":
     
     craft_time = time.time()
     print("Craft time: ", str(datetime.timedelta(seconds=craft_time - train_time)))
+  
+    if args.retrain_from_init:
+        model.retrain(data, poison_delta) # Evaluate poison performance on the retrained model
     
     # Export
     if args.save_poison is not None and args.recipe != 'naive':
-        data.export_poison(poison_delta, path=args.poison_path, mode=args.save_poison)
-        
+        data.export_poison(poison_delta, model, path=args.poison_path, mode=args.save_poison)
+
     if args.save_backdoored_model:
         data.export_backdoored_model(model.model)
-        
+            
     write('Validation without defense...', args.output)
     model.validate(data, poison_delta, val_max_epoch=args.val_max_epoch)
     test_time = time.time()
@@ -97,10 +103,10 @@ if __name__ == "__main__":
         clean_ids = defense(data, model, poison_delta, args)
         poison_ids = set(range(len(data.trainset))) - set(clean_ids)
         removed_images = len(data.trainset) - len(clean_ids)
-        removed_poisons = len(set(data.poison_target_ids+data.trigger_target_ids) & poison_ids)
+        removed_poisons = len(set(data.poison_target_ids) & poison_ids)
         removed_cleans = removed_images - removed_poisons
-        elimination_rate = removed_poisons/(len(data.poison_target_ids) + len(data.trigger_target_ids))*100
-        sacrifice_rate = removed_cleans/(len(data.trainset)-len(data.poison_target_ids)-len(data.trigger_target_ids))*100
+        elimination_rate = removed_poisons/(len(data.poison_target_ids))*100
+        sacrifice_rate = removed_cleans/len(data.trainset)*100
         
         # Statistics
         data.reset_trainset(clean_ids)

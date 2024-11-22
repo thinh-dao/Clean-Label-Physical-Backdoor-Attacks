@@ -5,9 +5,7 @@ import torch.nn as nn
 import math
 import os
 from torch.nn import functional as F
-from torchvision.models import resnet50, resnet18, vgg11, ResNet50_Weights, ResNet18_Weights, VGG11_Weights
-
-from torchvision import models
+from torchvision.models import resnet50, resnet18, vgg11, mobilenet_v2, mobilenet_v3_small, ResNet50_Weights, ResNet18_Weights, VGG11_Weights, MobileNet_V2_Weights, MobileNet_V3_Small_Weights
 from torchvision.models.resnet import BasicBlock, Bottleneck
 
 import pickle
@@ -45,16 +43,11 @@ def get_model(model_name, num_classes=10, pretrained=True):
         else:
             model = InceptionResnetV1(pretrained=None, classify=True, num_classes=num_classes)
     elif model_name.lower() == 'mobilenetv2':
-        model = MobileNetV2(num_classes=1000, width_mult=1.0)
-        if pretrained:
-            # Load the pre-trained weights if required
-            path = "pretrained/mobilenet_imagenet.pth"
-            state_dict = torch.load(path)
-            model.load_state_dict(state_dict)
-            # Replace the classifier as well the number of classes in your dataset is different from the pretrained model
-            
-            if num_classes != 1000:
-                model.classifier = nn.Linear(model.classifier.in_features, num_classes)
+        model = mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1)
+        model.classifier[-1] = nn.Linear(model.last_channel, num_classes)
+    elif model_name.lower() == 'mobilenetv3':
+        model = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.IMAGENET1K_V1)
+        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
     else:
         raise NotImplementedError(f'Model {model_name} not implemented')
     return model
@@ -635,9 +628,9 @@ def load_weights(model, name):
         ValueError: If 'pretrained' not equal to 'vggface2' or 'casia-webface'.
     """
     if name == 'vggface2':
-        path = 'pretrained/mobilenetv2_vggface2.pt'
+        path = 'pretrained/inceptionresnet_vggface2.pt'
     elif name == 'casia-webface':
-        path = 'pretrained/mobilenetv2_casia-webface.pt'
+        path = 'pretrained/inceptionresnet_casia-webface.pt'
     else:
         raise ValueError('Pretrained models only exist for "vggface2" and "casia-webface"')
 

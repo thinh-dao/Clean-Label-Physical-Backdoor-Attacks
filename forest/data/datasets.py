@@ -6,9 +6,9 @@ import copy
 import bisect
 import torchvision
 import matplotlib.pyplot as plt
-# import dlib
-# import cv2
-# from imutils import face_utils
+import dlib
+import cv2
+from imutils import face_utils
 torchvision.disable_beta_transforms_warning()
 from torchvision.transforms import v2 as transforms
 from PIL import Image
@@ -140,7 +140,7 @@ class PoisonSet(torch.utils.data.Dataset):
         
         if self.transform is not None:
             sample = self.transform(sample)
-        if self.normalization:
+        if self.normalize:
             sample = normalization(sample)
         return sample, target, index
 

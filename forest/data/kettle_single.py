@@ -428,7 +428,6 @@ class KettleSingle():
         """Select and initialize poison_target_ids, poisonset, poisonloader, poison_lookup, clean_ids."""
                 
         # Set up initial values 
-        self.trigger_target_ids = []
         self.poison_target_ids = []
         self.poison_num = 0
         self.poisonset = None
@@ -659,7 +658,7 @@ class KettleSingle():
                 write('Mapping facial landmarks...', self.args.output)
                 self.face_detector = FaceDetector(self.args, self.poisonset, patch_trigger=True)
         
-        self.clean_ids = [idx for idx in range(len(self.trainset)) if (idx not in self.poison_target_ids) and (idx not in self.trigger_target_ids)]
+        self.clean_ids = [idx for idx in range(len(self.trainset)) if (idx not in self.poison_target_ids)]
     
     def construction(self):
         """Construct according to random selection.
