@@ -1,12 +1,18 @@
 import torch
 import numpy as np
 import random
+import torch.nn as nn
+import copy
 
+from forest.utils import bypass_last_layer
+from sklearn import metrics
 from .data.datasets import PoisonSet, normalization
+from torch.utils.data import Subset
 from tqdm import tqdm
 from .consts import NON_BLOCKING, NORMALIZE
 from sklearn.decomposition import FastICA
 from sklearn.metrics import silhouette_score
+from .victims.models import get_model
 
 def get_defense(defense):
     if defense == 'ss':
@@ -21,8 +27,8 @@ def get_defense(defense):
         return _Strip
     elif defense== 'scan':
         return _Scan
-    elif defense == 'nc':
-        return _NeuralCleanse
+    elif defense == 'ct':
+        return _CT
     else:
         raise NotImplementedError('Defense is not implemented')
 
@@ -125,10 +131,16 @@ def _SpectralSignature(kettle, victim, poison_delta, args, num_classes=10, overe
             temp_feats = torch.cat(temp_feats)
             mean_feat = torch.mean(temp_feats, dim=0)
             temp_feats = temp_feats - mean_feat
-            _, _, V = torch.svd(temp_feats, compute_uv=True, some=False)
-            vec = V[:, 0]  # the top right singular vector is the first column of V
+            
+            # Compute SVD
+            U, S, Vh = torch.linalg.svd(temp_feats, full_matrices=False)
+            
+            # Use the first singular vector (corresponds to largest singular value)
+            vec = Vh[0, :]  # First row of Vh
+            
             vals = []
             for j in range(temp_feats.shape[0]):
+                # Compute projection along the first right singular vector
                 vals.append(torch.dot(temp_feats[j], vec).pow(2))
 
             k = min(int(overestimation_factor * num_poisons_expected), len(vals) - 1)
@@ -179,7 +191,7 @@ def _ActivationClustering(kettle, victim, poison_delta, args, num_classes=10, cl
                 print(f"Outlier Num in Class {target_class}:", len(outliers))
                 suspicious_indices += outliers
     
-    clean_indices = list(set(range(len(kettle.trainset))) - set(suspicious_indices))    
+    clean_indices = list(set(range(len(kettle.trainset))) - set(suspicious_indices))
     return clean_indices
     
 def _Strip(kettle, victim, poison_delta, args, num_classes=10):
@@ -251,6 +263,11 @@ def _Strip(kettle, victim, poison_delta, args, num_classes=10):
 
 def _NeuralCleanse(kettle, victim, poison_delta, args, num_classes=10):
     pass
+
+def _CT(kettle, victim, poison_delta, args, num_classes=10):
+    ct_detector = ConfusionTraining(kettle, victim, poison_delta, debug_info=True)
+    clean_indices = ct_detector.detect()
+    return clean_indices
 
 def _Scan(kettle, victim, poison_delta, args, num_classes=10):
     kwargs = {'num_workers': 3, 'pin_memory': True}
@@ -909,3 +926,703 @@ def filter_gaussian_mean(X: np.ndarray,
         assume_centered=assume_centered,
         random_state=random_state
     )
+
+class ConfusionTraining:
+    def __init__(self, kettle, victim, poison_delta, debug_info=False, defense_ratio=0.2):
+        self.kettle = kettle
+
+        # Make sure all models are moved to the same device (cuda:0) first
+        self.base_model = victim.model.to('cuda:0')  # Explicitly move to cuda:0
+        self.pretrained_model = get_model(kettle.args.net[0], num_classes=kettle.num_classes, pretrained=True).to('cuda:0')
+        self.confused_model = copy.deepcopy(self.pretrained_model)
+
+        # DataParallel will handle moving the replicas to other devices
+        if torch.cuda.device_count() > 1:
+            self.base_model = nn.DataParallel(self.base_model)
+            self.pretrained_model = nn.DataParallel(self.pretrained_model)
+            self.confused_model = nn.DataParallel(self.confused_model)
+
+        self.debug_info = debug_info
+        self.defense_ratio = defense_ratio
+
+        self.distillation_ratio = [1/2, 1/5, 1/25, 1/50, 1/100]
+        self.momentums = [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+        self.lambs = [20, 20, 20, 30, 30, 15]
+        self.lrs = [0.001, 0.001, 0.001, 0.01, 0.01, 0.01]
+        self.batch_factors = [2, 2, 2, 2, 2, 2]
+
+        self.weight_decay = 1e-4
+        self.median_sample_rate = 0.1
+        
+        size = int(defense_ratio * len(self.kettle.validset))
+        random_indices = torch.randperm(len(self.kettle.validset))[:size]
+        self.clean_set = Subset(self.kettle.validset, indices=random_indices)
+        self.clean_loader = torch.utils.data.DataLoader(self.clean_set, 
+                                                        batch_size=64, 
+                                                        shuffle=False, 
+                                                        num_workers=4, 
+                                                        pin_memory=True
+                                                    )
+        self.inspection_set = PoisonSet(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE)
+
+    def detect(self):
+        distilled_samples_indices, median_sample_indices, model = self.iterative_poison_distillation(self.inspection_set,
+                                        self.clean_set, self.debug_info)
+        
+        suspicious_indices = self.identify_poison_samples_simplified(self.inspection_set, median_sample_indices,
+                                                                model)
+        clean_indices = sorted(list(set(range(len(self.kettle.trainset))) - set(suspicious_indices)))
+        return clean_indices
+        
+
+    def iterative_poison_distillation(self, inspection_set, clean_set, debug_info=None):
+        clean_set_loader = torch.utils.data.DataLoader(clean_set, 
+                                                batch_size=64,
+                                                shuffle=True, 
+                                                pin_memory=True,
+                                                num_workers=4)
+
+        print('>>> Iterative Data Distillation with Confusion Training')
+
+        distilled_samples_indices, median_sample_indices = None, None
+        num_confusion_iter = len(self.distillation_ratio)
+        criterion_no_reduction = nn.CrossEntropyLoss(reduction='none')
+        criterion = nn.CrossEntropyLoss()
+           
+        distilled_set = inspection_set
+        for confusion_iter in range(num_confusion_iter):
+            size_of_distilled_set = len(distilled_set)
+            print('<Round-%d> Size_of_distillation_set = ' % confusion_iter, size_of_distilled_set)
+
+            # different weights for each class based on their frequencies in the distilled set
+            nums_of_each_class = np.zeros(self.kettle.num_classes)
+            for i in range(size_of_distilled_set):
+                _, gt, _ = distilled_set[i]
+                if isinstance(gt, torch.Tensor):
+                    gt = gt.item()
+                nums_of_each_class[gt] += 1
+            print(nums_of_each_class)
+            freq_of_each_class = nums_of_each_class / size_of_distilled_set
+            freq_of_each_class = np.sqrt(freq_of_each_class + 0.001)
+
+            pretrain_epochs = 8
+            pretrain_lr = 0.01
+            distillation_iters = 100
+
+            if confusion_iter == num_confusion_iter - 1:
+                freq_of_each_class[:] = 1
+
+            if confusion_iter != num_confusion_iter - 1:
+                distilled_set_loader = torch.utils.data.DataLoader(
+                    distilled_set,
+                    batch_size=64,
+                    shuffle=True,
+                    pin_memory=True,
+                    num_workers=4)
+            else:
+                distilled_set_loader = torch.utils.data.DataLoader(
+                    torch.utils.data.ConcatDataset([distilled_set, clean_set]),
+                    batch_size=64,
+                    shuffle=True,
+                    pin_memory=True,
+                    num_workers=4)
+
+            print('freq: ', freq_of_each_class)
+
+            distilled_set_loader = torch.utils.data.DataLoader(
+                distilled_set,
+                batch_size=64, 
+                shuffle=True,
+                pin_memory=True,
+                num_workers=4
+            )
+            self.pretrained_model = self.pretrain(confusion_iter=confusion_iter,
+                        pretrain_model=self.pretrained_model, 
+                        weight_decay=self.weight_decay, 
+                        pretrain_epochs=pretrain_epochs, 
+                        distilled_set_loader=distilled_set_loader, 
+                        lr=pretrain_lr,
+                        criterion=criterion)
+
+            distilled_set_loader = torch.utils.data.DataLoader(
+                distilled_set,
+                batch_size=64, 
+                shuffle=True,
+                pin_memory=True,
+                num_workers=4
+            )
+            
+            # confusion_training
+            self.confused_model = copy.deepcopy(self.pretrained_model)
+            model = self.confusion_train(confusion_iter=confusion_iter, base_model=self.base_model, 
+                                         confused_model=self.confused_model, 
+                                         distilled_set_loader=distilled_set_loader, 
+                                         clean_set_loader=clean_set_loader, 
+                                         weight_decay=self.weight_decay, 
+                                         criterion_no_reduction=criterion_no_reduction,
+                                         momentum=self.momentums[confusion_iter], 
+                                         lamb=self.lambs[confusion_iter],
+                                         freq=freq_of_each_class, 
+                                         lr=self.lrs[confusion_iter], 
+                                         batch_factor=self.batch_factors[confusion_iter], 
+                                         distillation_iters=distillation_iters)
+
+            # distill the inspected set according to the loss values
+            distilled_samples_indices, median_sample_indices = self.distill(self.confused_model, inspection_set,
+                                                                                        confusion_iter, criterion_no_reduction)
+
+            distilled_set = torch.utils.data.Subset(inspection_set, distilled_samples_indices)
+
+        return distilled_samples_indices, median_sample_indices, model
+    
+
+    def pretrain(self, confusion_iter, pretrain_model, weight_decay, pretrain_epochs, distilled_set_loader, lr, criterion=torch.nn.CrossEntropyLoss()):
+        '''
+            pretraining on the poisoned dataset to learn a prior of the backdoor
+
+            Parameters:
+                confusion_iter (int): the round id of the confusion training
+                pretrain_model: the model to be pretrained
+                weight_decay (float): weight_decay parameter for optimizer
+                pretrain_epochs (int): number of pretraining epochs
+                distilled_set_loader (torch.utils.data.DataLoader): data loader of the distilled set
+                criterion: loss function
+                lr (float): learning rate
+    
+            Returns:
+                model: the pretrained model
+        '''
+
+        ######### Pretrain Base Model ##############
+        optimizer = torch.optim.SGD(pretrain_model.parameters(), lr,  momentum=0.9, weight_decay=weight_decay)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[4], gamma=0.1)
+
+        for epoch in range(1, pretrain_epochs + 1):  # pretrain backdoored base model with the distilled set
+            pretrain_model.train()
+
+            for batch_idx, (data, target, idxs) in enumerate( tqdm(distilled_set_loader) ):
+                optimizer.zero_grad()
+                data, target = data.cuda(), target.cuda()  # train set batch
+                output = pretrain_model(data)
+                loss = criterion(output, target)
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+
+            if epoch % 2 == 0:
+                print('<Round-{} : Pretrain> Train Epoch: {}/{} \tLoss: {:.6f}'.format(confusion_iter, epoch, pretrain_epochs, loss.item()))
+                if self.debug_info:
+                    eval_model(pretrain_model, self.kettle)
+
+        return pretrain_model
+    
+    def confusion_train(self, confusion_iter, base_model, confused_model, distilled_set_loader, clean_set_loader, 
+                        weight_decay, criterion_no_reduction, momentum, lamb, freq, lr, batch_factor, distillation_iters):
+        '''
+        key codes for confusion training loop
+
+        Parameters:
+            confusion_iter (int): the round id of the confusion training
+            base_model: the backdoored model
+            confused_model: the confused model
+            distilled_set_loader (torch.utils.data.DataLoader): the data loader of distilled set in previous rounds
+            clean_set_loader (torch.utils.data.DataLoader): the data loader of the reserved clean set
+            lamb (int): the weight parameter to balance confusion training objective and clean training objective
+            freq (int): class frequency of the distilled set
+            lr (float): learning rate of the optimizer
+            batch_factor (int): the number of batch intervals of applying confusion training objective
+            distillation_iters (int): the number of confusion training iterations
+
+        Returns:
+            the confused model in this round
+        '''
+        base_model.eval()
+
+        ######### Distillation Step ################
+
+        optimizer = torch.optim.SGD(confused_model.parameters(), lr=lr, weight_decay=weight_decay,
+                                    momentum=momentum)
+
+        distilled_set_iters = iter(distilled_set_loader)
+        clean_set_iters = iter(clean_set_loader)
+
+
+        rounder = 0
+        for batch_idx in tqdm(range(distillation_iters)):
+
+            try:
+                data_shift, target_shift, idxs = next(clean_set_iters)
+            except Exception as e:
+                clean_set_iters = iter(clean_set_loader)
+                data_shift, target_shift, idxs = next(clean_set_iters)
+
+            data_shift, target_shift = data_shift.cuda(), target_shift.cuda()
+
+            with torch.no_grad():
+                preds = torch.argmax(base_model(data_shift), dim=1).detach()
+                if (rounder + batch_idx) % self.kettle.num_classes == 0:
+                    rounder += 1
+                next_target = (preds + rounder + batch_idx) % self.kettle.num_classes
+                target_confusion = next_target
+
+            confused_model.train()
+
+            if batch_idx % batch_factor == 0:
+                try:
+                    data, target, idxs = next(distilled_set_iters)
+                except Exception as e:
+                    distilled_set_iters = iter(distilled_set_loader)
+                    data, target, idxs = next(distilled_set_iters)
+
+                data, target = data.cuda(), target.cuda()
+                data_mix = torch.cat([data_shift, data], dim=0)
+                target_mix = torch.cat([target_confusion, target], dim=0)
+                boundary = data_shift.shape[0]
+
+                output_mix = confused_model(data_mix)
+                loss_mix = criterion_no_reduction(output_mix, target_mix)
+
+                loss_inspection_batch_all = loss_mix[boundary:]
+                loss_confusion_batch_all = loss_mix[:boundary]
+                loss_confusion_batch = loss_confusion_batch_all.mean()
+                target_inspection_batch_all = target_mix[boundary:]
+                inspection_batch_size = len(loss_inspection_batch_all)
+                loss_inspection_batch = 0
+                normalizer = 0
+                for i in range(inspection_batch_size):
+                    gt = int(target_inspection_batch_all[i].item())
+                    loss_inspection_batch += (loss_inspection_batch_all[i] / freq[gt])
+                    normalizer += (1 / freq[gt])
+                loss_inspection_batch = loss_inspection_batch / normalizer
+
+                weighted_loss = (loss_confusion_batch * (lamb-1) + loss_inspection_batch) / lamb
+
+                loss_confusion_batch = loss_confusion_batch.item()
+                loss_inspection_batch = loss_inspection_batch.item()
+            else:
+                output = confused_model(data_shift)
+                weighted_loss = loss_confusion_batch = criterion_no_reduction(output, target_confusion).mean()
+                loss_confusion_batch = loss_confusion_batch.item()
+
+            optimizer.zero_grad()
+            weighted_loss.backward()
+            optimizer.step()
+
+            if (batch_idx + 1) % 100 == 0:
+                print('<Round-{} : Distillation Step> Batch_idx: {}, batch_factor: {}, lr: {}, lamb : {}, moment : {}, Loss: {:.6f}'.format(
+                    confusion_iter, batch_idx + 1, batch_factor, optimizer.param_groups[0]['lr'], lamb, momentum,
+                    weighted_loss.item()))
+                print('inspection_batch_loss = %f, confusion_batch_loss = %f' %
+                    (loss_inspection_batch, loss_confusion_batch))
+
+                if self.debug_info:
+                    eval_model(confused_model, self.kettle)
+
+        return confused_model
+
+    def distill(self, confused_model, inspection_set, n_iter, criterion_no_reduction, final_budget = None, class_wise = False):
+        '''
+        distill samples from the dataset based on loss values of the inference model
+
+        Parameters:
+            confused_model: the model that is confused by Confusion Training
+            inspection_set (torch.utils.data.Dataset): the dataset that potentially contains poison samples and needs to be cleansed
+            n_iter (int): id of current iteration
+            criterion_no_reduction: loss function
+            final_budget (int): maximal number of distilled samples
+            class_wise (bool): whether to list indices of distilled samples for each class seperately
+
+        Returns:
+            indicies of distilled samples
+        '''
+        num_samples = len(inspection_set)
+        num_confusion_iter = len(self.distillation_ratio) + 1
+
+        inspection_set_loader = torch.utils.data.DataLoader(
+                                                    inspection_set, 
+                                                    batch_size=256,
+                                                    shuffle=False,
+                                                    num_workers=4,
+                                                    pin_memory=True
+                                                )
+
+        """
+            Collect loss values for inspected samples.
+        """
+        loss_array = []
+        correct_instances = [] # Instances that the confused model correctly predicts
+        gts = [] # Ground truth labels
+        confused_model.eval()
+        st = 0
+        with torch.no_grad():
+
+            for data, target, idxs in tqdm(inspection_set_loader):
+                data, target = data.cuda(), target.cuda()
+                output = confused_model(data)
+
+                preds = torch.argmax(output, dim=1)
+                batch_loss = criterion_no_reduction(output, target)
+                this_batch_size = len(target)
+
+                for i in range(this_batch_size):
+                    loss_array.append(batch_loss[i].item())
+                    gts.append(int(target[i].item()))
+
+                    if preds[i] == target[i]:
+                        correct_instances.append(st + i)
+
+                st += this_batch_size
+
+        loss_array = np.array(loss_array)
+        sorted_indices = np.argsort(loss_array)
+ 
+        top_indices_each_class = [[] for _ in range(self.kettle.num_classes)]
+        for t in sorted_indices:
+            gt = gts[t]
+            top_indices_each_class[gt].append(t)
+
+        """
+            Distill samples with low loss values from the inspected set.
+        """
+
+        if n_iter < num_confusion_iter - 1:
+
+            if self.distillation_ratio[n_iter] is None:
+                distilled_samples_indices = head = correct_instances
+            else:
+                num_expected = int(self.distillation_ratio[n_iter] * num_samples)
+                head = sorted_indices[:num_expected]
+                head = list(head)
+                distilled_samples_indices = head
+
+            if n_iter < num_confusion_iter - 2: 
+                rate_factor = 50
+            else: 
+                rate_factor = 100
+
+            class_dist = np.zeros(self.kettle.num_classes, dtype=int)
+            for i in distilled_samples_indices:
+                gt = gts[i]
+                class_dist[gt] += 1
+
+            for i in range(self.kettle.num_classes):
+                minimal_sample_num = len(top_indices_each_class[i]) // rate_factor
+                print('class-%d, collected=%d, minimal_to_collect=%d' % (i, class_dist[i], minimal_sample_num) )
+                if class_dist[i] < minimal_sample_num:
+                    for k in range(class_dist[i], minimal_sample_num):
+                        distilled_samples_indices.append(top_indices_each_class[i][k])
+
+        else:
+            if final_budget is not None:
+                head = sorted_indices[:final_budget]
+                head = list(head)
+                distilled_samples_indices = head
+            else:
+                distilled_samples_indices = head = correct_instances
+
+        distilled_samples_indices.sort()
+
+
+        median_sample_indices = []
+        sorted_indices_each_class = [[] for _ in range(self.kettle.num_classes)]
+        for temp_id in sorted_indices:
+            gt = gts[temp_id]
+            sorted_indices_each_class[gt].append(temp_id)
+
+        for i in range(self.kettle.num_classes):
+            num_class_i = len(sorted_indices_each_class[i])
+            st = int(num_class_i / 2 - num_class_i * self.median_sample_rate / 2)
+            ed = int(num_class_i / 2 + num_class_i * self.median_sample_rate / 2)
+            for temp_id in range(st, ed):
+                median_sample_indices.append(sorted_indices_each_class[i][temp_id])
+
+        """Report statistics of the distillation results...
+        """
+        if self.debug_info:
+
+            print('num_correct : ', len(correct_instances))
+            poison_indices = self.kettle.poison_target_ids
+
+            cnt = 0
+            for s, cid in enumerate(head):  # enumerate the head part
+                original_id = cid
+                if original_id in poison_indices:
+                    cnt += 1
+
+            print('How Many Poison Samples are Concentrated in the Head? --- %d/%d = %f' % (cnt, len(poison_indices), cnt/len(poison_indices)))
+
+            poison_dist = []
+
+            for temp_id in range(num_samples):
+                if sorted_indices[temp_id] in poison_indices:
+                    poison_dist.append(temp_id)
+
+            print('poison distribution : ', poison_dist)
+
+            num_poison = len(poison_indices)
+            num_collected = len(correct_instances)
+            pt = 0
+
+            recall = 0
+            for idx in correct_instances:
+                if pt >= num_poison:
+                    break
+                while (idx > poison_indices[pt] and pt + 1 < num_poison): 
+                    pt += 1
+                if pt < num_poison and poison_indices[pt] == idx:
+                    recall += 1
+
+            fpr = num_collected - recall
+            print('recall = %d/%d = %f, fpr = %d/%d = %f' % (recall, num_poison, recall/num_poison if num_poison!=0 else 0,
+                                                                fpr, num_samples - num_poison,
+                                                                fpr / (num_samples - num_poison) if (num_samples-num_poison)!=0 else 0))
+
+        if class_wise:
+            return distilled_samples_indices, median_sample_indices, top_indices_each_class
+        else:
+            return distilled_samples_indices, median_sample_indices
+
+    def get_features(self, data_loader, model):
+        '''
+            Extract features on a dataset with a given model
+
+            Parameters:
+                data_loader (torch.utils.data.DataLoader): the dataloader of the dataset on which we want to extract features
+                model (nn.Module): the mode used to extract features
+
+            Returns:
+                feats(list): a list of features for each sample in the dataset
+                label_list(list): the ground truth label for each sample in the dataset
+                preds_list(list): the model's prediction on each sample of the dataset
+                gt_confidence(list): the model's confidence on the ground truth label of each sample in the dataset
+                loss_vals(list): the loss values of the model on each sample in the dataset
+            '''
+
+        headless_model, last_layer = bypass_last_layer(model)
+        label_list = []
+        preds_list = []
+        feats = []
+        gt_confidence = []
+        loss_vals = []
+
+        criterion_no_reduction = nn.CrossEntropyLoss(reduction='none')
+        model.eval()
+
+        with torch.no_grad():
+
+            for i, (ins_data, ins_target, _) in enumerate(tqdm(data_loader)):
+
+                ins_data, ins_target = ins_data.cuda(), ins_target.cuda()
+                x_features = headless_model(ins_data)
+                output = last_layer(x_features)
+
+                loss = criterion_no_reduction(output, ins_target).cpu().numpy()
+
+                preds = torch.argmax(output, dim=1).cpu().numpy()
+                prob = torch.softmax(output, dim=1).cpu().numpy()
+                this_batch_size = len(ins_target)
+
+                for bid in range(this_batch_size):
+                    gt = ins_target[bid].cpu().item()
+                    feats.append(x_features[bid].cpu().numpy())
+                    label_list.append(gt)
+                    preds_list.append(preds[bid])
+                    gt_confidence.append(prob[bid][gt])
+                    loss_vals.append(loss[bid])
+        return feats, label_list, preds_list, gt_confidence, loss_vals
+
+    def identify_poison_samples_simplified(self, inspection_set, clean_indices, model):
+        '''
+        Identify poison samples in a dataset (under inspection) with the confused model.
+
+        Parameters:
+            inspection_set (torch.utils.data.Dataset): the dataset that potentially contains poison samples and needs to be cleansed
+            clean_indices (dict): a set of indices of samples that are expected to be clean (e.g., have high loss values after confusion training)
+            model (nn.Module): the model used to detect poison samples
+
+        Returns:
+            suspicious_indices (list): indices of detected poison samples
+        '''
+
+        from scipy.stats import multivariate_normal
+
+
+        num_samples = len(inspection_set)
+
+        # main dataset we aim to cleanse
+        inspection_split_loader = torch.utils.data.DataLoader(
+            inspection_set,
+            batch_size=128, 
+            shuffle=False, 
+            pin_memory=True,
+            num_workers=4,
+        )
+
+        model.eval()
+        feats_inspection, class_labels_inspection, preds_inspection, \
+        gt_confidence_inspection, loss_vals = self.get_features(inspection_split_loader, model)
+
+        feats_inspection = np.array(feats_inspection)
+        class_labels_inspection = np.array(class_labels_inspection)
+
+        class_indices = [[] for _ in range(self.kettle.num_classes)]
+        class_indices_in_clean_chunklet = [[] for _ in range(self.kettle.num_classes)]
+
+        for i in range(num_samples):
+            gt = int(class_labels_inspection[i])
+            class_indices[gt].append(i)
+
+        for i in clean_indices:
+            gt = int(class_labels_inspection[i])
+            class_indices_in_clean_chunklet[gt].append(i)
+
+        for i in range(self.kettle.num_classes):
+            class_indices[i].sort()
+            class_indices_in_clean_chunklet[i].sort()
+
+            if len(class_indices[i]) < 2:
+                raise Exception('dataset is too small for class %d' % i)
+
+            if len(class_indices_in_clean_chunklet[i]) < 2:
+                raise Exception('clean chunklet is too small for class %d' % i)
+
+        # apply cleanser, if the likelihood of two-clusters-model is twice of the likelihood of single-cluster-model
+        threshold = 2
+        suspicious_indices = []
+        class_likelihood_ratio = []
+
+        for target_class in range(self.kettle.num_classes):
+
+            num_samples_within_class = len(class_indices[target_class])
+            print('class-%d : ' % target_class, num_samples_within_class)
+            clean_chunklet_size = len(class_indices_in_clean_chunklet[target_class])
+            clean_chunklet_indices_within_class = []
+            pt = 0
+            for i in range(num_samples_within_class):
+                if pt == clean_chunklet_size:
+                    break
+                if class_indices[target_class][i] < class_indices_in_clean_chunklet[target_class][pt]:
+                    continue
+                else:
+                    clean_chunklet_indices_within_class.append(i)
+                    pt += 1
+
+            print('start_pca..')
+
+            temp_feats = torch.FloatTensor(
+                feats_inspection[class_indices[target_class]]).cuda()
+
+
+            # reduce dimensionality
+            U, S, V = torch.pca_lowrank(temp_feats, q=2)
+            projected_feats = torch.matmul(temp_feats, V[:, :2]).cpu()
+
+            # isolate samples via the confused inference model
+            isolated_indices_global = []
+            isolated_indices_local = []
+            other_indices_local = []
+            labels = []
+            for pt, i in enumerate(class_indices[target_class]):
+                if preds_inspection[i] == target_class:
+                    isolated_indices_global.append(i)
+                    isolated_indices_local.append(pt)
+                    labels.append(1) # suspected as positive
+                else:
+                    other_indices_local.append(pt)
+                    labels.append(0)
+
+            projected_feats_isolated = projected_feats[isolated_indices_local]
+            projected_feats_other = projected_feats[other_indices_local]
+
+            print('========')
+            print('num_isolated:', projected_feats_isolated.shape)
+            print('num_other:', projected_feats_other.shape)
+
+            num_isolated = projected_feats_isolated.shape[0]
+
+            print('num_isolated : ', num_isolated)
+
+            if (num_isolated >= 2) and (num_isolated <= num_samples_within_class - 2):
+
+                mu = np.zeros((2,2))
+                covariance = np.zeros((2,2,2))
+
+                mu[0] = projected_feats_other.mean(axis=0)
+                covariance[0] = np.cov(projected_feats_other.T)
+                mu[1] = projected_feats_isolated.mean(axis=0)
+                covariance[1] = np.cov(projected_feats_isolated.T)
+
+                # avoid singularity
+                covariance += 0.001
+
+                # likelihood ratio test
+                single_cluster_likelihood = 0
+                two_clusters_likelihood = 0
+                for i in range(num_samples_within_class):
+                    single_cluster_likelihood += multivariate_normal.logpdf(x=projected_feats[i:i + 1], mean=mu[0],
+                                                                            cov=covariance[0],
+                                                                            allow_singular=True).sum()
+                    two_clusters_likelihood += multivariate_normal.logpdf(x=projected_feats[i:i + 1], mean=mu[labels[i]],
+                                                                        cov=covariance[labels[i]], allow_singular=True).sum()
+
+                likelihood_ratio = np.exp( (two_clusters_likelihood - single_cluster_likelihood) / num_samples_within_class )
+
+            else:
+
+                likelihood_ratio = 1
+
+            class_likelihood_ratio.append(likelihood_ratio)
+
+            print('likelihood_ratio = ', likelihood_ratio)
+
+        max_ratio = np.array(class_likelihood_ratio).max()
+
+        for target_class in range(self.kettle.num_classes):
+            likelihood_ratio = class_likelihood_ratio[target_class]
+
+            if likelihood_ratio == max_ratio and likelihood_ratio > 1.5:  # a lower conservative threshold for maximum ratio
+
+                print('[class-%d] class with maximal ratio %f!. Apply Cleanser!' % (target_class, max_ratio))
+
+                for i in class_indices[target_class]:
+                    if preds_inspection[i] == target_class:
+                        suspicious_indices.append(i)
+
+            elif likelihood_ratio > threshold:
+                print('[class-%d] likelihood_ratio = %f > threshold = %f. Apply Cleanser!' % (
+                    target_class, likelihood_ratio, threshold))
+
+                for i in class_indices[target_class]:
+                    if preds_inspection[i] == target_class:
+                        suspicious_indices.append(i)
+
+            else:
+                print('[class-%d] likelihood_ratio = %f <= threshold = %f. Pass!' % (
+                    target_class, likelihood_ratio, threshold))
+
+        return suspicious_indices
+        
+def eval_model(model, kettle):
+    model.eval()
+    clean_acc, asr = 0, 0
+    corrects = 0
+    for batch_idx, (data, target, idxs) in enumerate(tqdm(kettle.validloader)):
+        data, target = data.to('cuda:0'), target.to('cuda:0')
+        output = model(data)
+        pred = output.argmax(dim=1)
+        corrects += torch.eq(pred, target).sum().item()
+    clean_acc = corrects / len(kettle.validloader.dataset)
+
+    source_class = kettle.poison_setup['source_class'][0]
+    target_class = kettle.poison_setup['target_class']
+
+    corrects = 0
+    for batch_idx, (data, _, _) in enumerate(tqdm(kettle.source_testloader[source_class])):
+        data = data.to('cuda:0')
+        output = model(data)
+        pred = output.argmax(dim=1)
+        corrects += torch.eq(pred, target_class).sum().item()
+    asr = corrects / len(kettle.source_testloader[source_class].dataset)
+
+    print(f"Clean Accuracy: {clean_acc*100:.2f}%, ASR: {asr*100:.2f}%")
+    return clean_acc, asr

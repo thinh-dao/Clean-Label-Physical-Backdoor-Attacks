@@ -7,15 +7,14 @@ import torch
 import random
 import numpy as np
 import torch.nn.functional as F
-import time
 import logging
 import sys
 import torchvision.transforms.v2 as transforms
+from contextlib import contextmanager
 
+from torch import nn
 from .consts import NON_BLOCKING
 from collections import defaultdict
-from tqdm import tqdm
-from submodlib.functions.facilityLocation import FacilityLocationFunction
 
 os.environ["CUDA_VISIBLE_DEVICES"]="3"
 def system_startup(args=None, defs=None):
@@ -201,8 +200,12 @@ def total_variation_loss(flows,padding_mode='constant', epsilon=1e-8):
     return loss.type(torch.float32)
 
 def upwind_tv(x):
-    # x is a batch of images with shape (batch_size, channels, height, width)
-
+    # Check dimensions and add batch dimension if needed
+    if x.dim() == 3:  # (channels, height, width)
+        x = x.unsqueeze(0)  # Add batch dimension -> (1, channels, height, width)
+    
+    # x is now a batch of images with shape (batch_size, channels, height, width)
+    
     # Shifted versions of the image
     x_right = F.pad(x[:, :, :, 1:], (0, 1, 0, 0), mode='replicate')  # right shift
     x_left = F.pad(x[:, :, :, :-1], (1, 0, 0, 0), mode='replicate')  # left shift
@@ -219,210 +222,6 @@ def upwind_tv(x):
     tv = (diff_right**2 + diff_left**2 + diff_down**2 + diff_up**2).mean()
 
     return tv
-
-def get_subset(args, model, trainloader, num_sampled, epoch, N, indices, num_classes=10):
-    trainloader = tqdm(trainloader)
-
-    grad_preds = []
-    labels = []
-    conf_all = np.zeros(N)
-    conf_true = np.zeros(N)
-
-    with torch.no_grad():
-        for _, (inputs, targets, index) in enumerate(trainloader):
-            model.eval()
-            targets = targets.long()
-
-            inputs = inputs.cuda()
-
-            confs = torch.softmax(model(inputs), dim=1).cpu().detach()
-            conf_all[index] = np.amax(confs.numpy(), axis=1)
-            conf_true[index] = confs[range(len(targets)), targets].numpy()
-            g0 = confs - torch.eye(num_classes)[targets.long()]
-            grad_preds.append(g0.cpu().detach().numpy())
-
-            targets = targets.numpy()
-            labels.append(targets)
-        
-        labels = np.concatenate(labels)
-        subset, subset_weights, _, _, cluster_ = get_coreset(np.concatenate(grad_preds), labels, len(labels), num_sampled, num_classes, equal_num=args.equal_num, optimizer=args.greedy, metric=args.metric)
-
-    subset = indices[subset]
-    cluster = -np.ones(N, dtype=int)
-    cluster[indices] = cluster_
-
-    keep_indices = np.where(subset_weights > args.cluster_thresh)
-    if epoch >= args.drop_after:
-        keep_indices = np.where(np.isin(cluster, keep_indices))[0]
-        subset = keep_indices
-    else:
-        subset = np.arange(N)
-
-    return subset
-
-def faciliy_location_order(c, X, y, metric, num_per_class, weights=None, optimizer="LazyGreedy"):
-    class_indices = np.where(y == c)[0]
-    X = X[class_indices]
-    N = X.shape[0]
-
-    start = time.time()
-    obj = FacilityLocationFunction(n=len(X), data=X, metric=metric, mode='dense')
-    S_time = time.time() - start
-
-    start = time.time()
-    greedyList = obj.maximize(
-        budget=num_per_class,
-        optimizer=optimizer,
-        stopIfZeroGain=False,
-        stopIfNegativeGain=False,
-        verbose=False,
-    )
-    order = list(map(lambda x: x[0], greedyList))
-    sz = list(map(lambda x: x[1], greedyList))
-    greedy_time = time.time() - start
-
-    S = obj.sijs
-    order = np.asarray(order, dtype=np.int64)
-    sz = np.zeros(num_per_class, dtype=np.float64)
-    cluster = -np.ones(N)
-
-    for i in range(N):
-        if np.max(S[i, order]) <= 0:
-            continue
-        cluster[i] = np.argmax(S[i, order])
-        if weights is None:
-            sz[np.argmax(S[i, order])] += 1
-        else:
-            sz[np.argmax(S[i, order])] += weights[i]
-    sz[np.where(sz==0)] = 1
-
-    cluster[cluster>=0] += c * num_per_class
-
-    return class_indices[order], sz, greedy_time, S_time, cluster
-
-def get_orders_and_weights(B, X, metric, y=None, weights=None, equal_num=False, num_classes=10, optimizer="LazyGreedy"):
-    '''
-    Ags
-    - X: np.array, shape [N, d]
-    - B: int, number of points to select
-    - metric: str, one of ['cosine', 'euclidean'], for similarity
-    - y: np.array, shape [N], integer class labels for C classes
-      - if given, chooses B / C points per class, B must be divisible by C
-    - outdir: str, path to output directory, must already exist
-
-    Returns
-    - order_mg/_sz: np.array, shape [B], type int64
-      - *_mg: order points by their marginal gain in FL objective (largest gain first)
-      - *_sz: order points by their cluster size (largest size first)
-    - weights_mg/_sz: np.array, shape [B], type float32, sums to 1
-    '''
-    N = X.shape[0]
-    if y is None:
-        y = np.zeros(N, dtype=np.int32)  # assign every point to the same class
-    if num_classes is not None:
-        classes = np.arange(num_classes)
-    else:
-        classes = np.unique(y)
-    C = len(classes)  # number of classes
-
-    if equal_num:
-        class_nums = [sum(y == c) for c in classes]
-        num_per_class = int(np.ceil(B / C)) * np.ones(len(classes), dtype=np.int32)
-        minority = class_nums < np.ceil(B / C)
-        if sum(minority) > 0:
-            extra = sum([max(0, np.ceil(B / C) - class_nums[c]) for c in classes])
-            for c in classes[~minority]:
-                num_per_class[c] += int(np.ceil(extra / sum(minority)))
-    else:
-        num_per_class = np.int32(np.ceil(np.divide([sum(y == i) for i in classes], N) * B))
-        total = np.sum(num_per_class)
-        diff = total - B
-        chosen = set()
-        for i in range(diff):
-            j = np.random.randint(C)
-            while j in chosen or num_per_class[j] <= 0:
-                j = np.random.randint(C)
-            num_per_class[j] -= 1
-            chosen.add(j)
-
-    order_mg_all, cluster_sizes_all, greedy_times, similarity_times, cluster_all = zip(*map(
-        lambda c: faciliy_location_order(c, X, y, metric, num_per_class[c], weights, optimizer=optimizer), classes))
-
-    order_mg = np.concatenate(order_mg_all).astype(np.int32)
-    weights_mg = np.concatenate(cluster_sizes_all).astype(np.float32)
-    class_indices = [np.where(y == c)[0] for c in classes]
-    class_indices = np.concatenate(class_indices).astype(np.int32)
-    class_indices = np.argsort(class_indices)
-    cluster_mg = np.concatenate(cluster_all).astype(np.int32)[class_indices]
-    assert len(order_mg) == len(weights_mg)
-
-    ordering_time = np.max(greedy_times)
-    similarity_time = np.max(similarity_times)
-
-    order_sz = []
-    weights_sz = []
-    vals = order_mg, weights_mg, order_sz, weights_sz, ordering_time, similarity_time, cluster_mg
-    return vals
-
-def get_coreset(gradient_est, 
-                labels, 
-                N, 
-                B, 
-                num_classes, 
-                equal_num=True,
-                optimizer="LazyGreedy",
-                metric='euclidean'):
-    '''
-    Arguments:
-        gradient_est: Gradient estimate
-            numpy array - (N,p) 
-        labels: labels of corresponding grad ests
-            numpy array - (N,)
-        B: subset size to select
-            int
-        num_classes:
-            int
-        normalize_weights: Whether to normalize coreset weights based on N and B
-            bool
-        gamma_coreset:
-            float
-        smtk:
-            bool
-        st_grd:
-            bool
-
-    Returns 
-    (1) coreset indices (2) coreset weights (3) ordering time (4) similarity time
-    '''
-    try:
-        subset, subset_weights, _, _, ordering_time, similarity_time, cluster = get_orders_and_weights(
-            B, 
-            gradient_est, 
-            metric, 
-            y=labels, 
-            equal_num=equal_num, 
-            num_classes=num_classes,
-            optimizer=optimizer)
-    except ValueError as e:
-        print(e)
-        print(f"WARNING: ValueError from coreset selection, choosing random subset for this epoch")
-        subset, subset_weights = get_random_subset(B, N)
-        ordering_time = 0
-        similarity_time = 0
-
-    if len(subset) != B:
-        print(f"!!WARNING!! Selected subset of size {len(subset)} instead of {B}")
-    print(f'FL time: {ordering_time:.3f}, Sim time: {similarity_time:.3f}')
-
-    return subset, subset_weights, ordering_time, similarity_time, cluster
-
-def get_random_subset(B, N):
-    print(f'Selecting {B} element from the random subset of size: {N}')
-    order = np.arange(0, N)
-    np.random.shuffle(order)
-    subset = order[:B]
-
-    return subset
 
 def gauss_smooth(image: torch.Tensor, sig=6) -> torch.Tensor:
     # Calculate kernel size based on sigma, ensuring it's odd
@@ -455,3 +254,205 @@ def min_max_normalize(batch):
     normalized_batch = (batch - min_vals) / (max_vals - min_vals)
     
     return normalized_batch
+
+def calculate_average_psnr(original_images, compressed_images):
+    """
+    Calculate the average PSNR for a collection of images.
+
+    Parameters:
+    - original_images: list of ndarrays, the original images.
+    - compressed_images: list of ndarrays, the compressed or reconstructed images.
+
+    Returns:
+    - average_psnr: float, the average PSNR value in decibels (dB).
+    """
+    assert len(original_images) == len(compressed_images), "Number of original and compressed images must match."
+    psnr_values = []
+    for original, compressed in zip(original_images, compressed_images):
+        psnr = calculate_psnr(original, compressed)
+        psnr_values.append(psnr)
+    
+    average_psnr = np.mean(psnr_values)
+    return average_psnr
+
+def calculate_psnr(original, compressed):
+    """
+    Calculate the PSNR (Peak Signal-to-Noise Ratio) between two images.
+
+    Parameters:
+    - original: ndarray, the original image.
+    - compressed: ndarray, the compressed or reconstructed image.
+
+    Returns:
+    - psnr: float, the PSNR value in decibels (dB).
+    """
+    assert original.shape == compressed.shape, "Input images must have the same dimensions."
+    mse = np.mean((original - compressed) ** 2)
+    if mse == 0:
+        return float('inf')  # No difference between images
+    max_pixel = 255.0 if np.max(original) > 1 else 1.0
+    psnr = 20 * np.log10(max_pixel / np.sqrt(mse))
+    return psnr
+
+class ReparamModule(nn.Module):
+    def _get_module_from_name(self, mn):
+        if mn == '':
+            return self
+        m = self
+        for p in mn.split('.'):
+            m = getattr(m, p)
+        return m
+
+    def __init__(self, module):
+        super(ReparamModule, self).__init__()
+        self.module = module
+
+        param_infos = []  # (module name/path, param name)
+        shared_param_memo = {}
+        shared_param_infos = []  # (module name/path, param name, src module name/path, src param_name)
+        params = []
+        param_numels = []
+        param_shapes = []
+        for mn, m in self.named_modules():
+            for n, p in m.named_parameters(recurse=False):
+                if p is not None:
+                    if p in shared_param_memo:
+                        shared_mn, shared_n = shared_param_memo[p]
+                        shared_param_infos.append((mn, n, shared_mn, shared_n))
+                    else:
+                        shared_param_memo[p] = (mn, n)
+                        param_infos.append((mn, n))
+                        params.append(p.detach())
+                        param_numels.append(p.numel())
+                        param_shapes.append(p.size())
+
+        assert len(set(p.dtype for p in params)) <= 1, \
+            "expects all parameters in module to have same dtype"
+
+        # store the info for unflatten
+        self._param_infos = tuple(param_infos)
+        self._shared_param_infos = tuple(shared_param_infos)
+        self._param_numels = tuple(param_numels)
+        self._param_shapes = tuple(param_shapes)
+
+        # flatten
+        flat_param = nn.Parameter(torch.cat([p.reshape(-1) for p in params], 0))
+        self.register_parameter('flat_param', flat_param)
+        self.param_numel = flat_param.numel()
+        del params
+        del shared_param_memo
+
+        # deregister the names as parameters
+        for mn, n in self._param_infos:
+            delattr(self._get_module_from_name(mn), n)
+        for mn, n, _, _ in self._shared_param_infos:
+            delattr(self._get_module_from_name(mn), n)
+
+        # register the views as plain attributes
+        self._unflatten_param(self.flat_param)
+
+        # now buffers
+        # they are not reparametrized. just store info as (module, name, buffer)
+        buffer_infos = []
+        for mn, m in self.named_modules():
+            for n, b in m.named_buffers(recurse=False):
+                if b is not None:
+                    buffer_infos.append((mn, n, b))
+
+        self._buffer_infos = tuple(buffer_infos)
+        self._traced_self = None
+
+    def trace(self, example_input, **trace_kwargs):
+        assert self._traced_self is None, 'This ReparamModule is already traced'
+
+        if isinstance(example_input, torch.Tensor):
+            example_input = (example_input,)
+        example_input = tuple(example_input)
+        example_param = (self.flat_param.detach().clone(),)
+        example_buffers = (tuple(b.detach().clone() for _, _, b in self._buffer_infos),)
+
+        self._traced_self = torch.jit.trace_module(
+            self,
+            inputs=dict(
+                _forward_with_param=example_param + example_input,
+                _forward_with_param_and_buffers=example_param + example_buffers + example_input,
+            ),
+            **trace_kwargs,
+        )
+
+        # replace forwards with traced versions
+        self._forward_with_param = self._traced_self._forward_with_param
+        self._forward_with_param_and_buffers = self._traced_self._forward_with_param_and_buffers
+        return self
+
+    def clear_views(self):
+        for mn, n in self._param_infos:
+            setattr(self._get_module_from_name(mn), n, None)  # This will set as plain attr
+
+    def _apply(self, *args, **kwargs):
+        if self._traced_self is not None:
+            self._traced_self._apply(*args, **kwargs)
+            return self
+        return super(ReparamModule, self)._apply(*args, **kwargs)
+
+    def _unflatten_param(self, flat_param):
+        ps = (t.view(s) for (t, s) in zip(flat_param.split(self._param_numels), self._param_shapes))
+        for (mn, n), p in zip(self._param_infos, ps):
+            setattr(self._get_module_from_name(mn), n, p)  # This will set as plain attr
+        for (mn, n, shared_mn, shared_n) in self._shared_param_infos:
+            setattr(self._get_module_from_name(mn), n, getattr(self._get_module_from_name(shared_mn), shared_n))
+
+    @contextmanager
+    def unflattened_param(self, flat_param):
+        saved_views = [getattr(self._get_module_from_name(mn), n) for mn, n in self._param_infos]
+        self._unflatten_param(flat_param)
+        yield
+        # Why not just `self._unflatten_param(self.flat_param)`?
+        # 1. because of https://github.com/pytorch/pytorch/issues/17583
+        # 2. slightly faster since it does not require reconstruct the split+view
+        #    graph
+        for (mn, n), p in zip(self._param_infos, saved_views):
+            setattr(self._get_module_from_name(mn), n, p)
+        for (mn, n, shared_mn, shared_n) in self._shared_param_infos:
+            setattr(self._get_module_from_name(mn), n, getattr(self._get_module_from_name(shared_mn), shared_n))
+
+    @contextmanager
+    def replaced_buffers(self, buffers):
+        for (mn, n, _), new_b in zip(self._buffer_infos, buffers):
+            setattr(self._get_module_from_name(mn), n, new_b)
+        yield
+        for mn, n, old_b in self._buffer_infos:
+            setattr(self._get_module_from_name(mn), n, old_b)
+
+    def _forward_with_param_and_buffers(self, flat_param, buffers, *inputs, **kwinputs):
+        with self.unflattened_param(flat_param):
+            with self.replaced_buffers(buffers):
+                return self.module(*inputs, **kwinputs)
+
+    def _forward_with_param(self, flat_param, *inputs, **kwinputs):
+        with self.unflattened_param(flat_param):
+            return self.module(*inputs, **kwinputs)
+
+    def forward(self, *inputs, flat_param=None, buffers=None, **kwinputs):
+        flat_param = torch.squeeze(flat_param)
+        # print("PARAMS ON DEVICE: ", flat_param.get_device())
+        # print("DATA ON DEVICE: ", inputs[0].get_device())
+        # flat_param.to("cuda:{}".format(inputs[0].get_device()))
+        # self.module.to("cuda:{}".format(inputs[0].get_device()))
+        if flat_param is None:
+            flat_param = self.flat_param
+        if buffers is None:
+            return self._forward_with_param(flat_param, *inputs, **kwinputs)
+        else:
+            return self._forward_with_param_and_buffers(flat_param, tuple(buffers), *inputs, **kwinputs)
+
+def set_lr(optimizer, lr, adaptive_lr=False):
+    if adaptive_lr:
+        for param_group in optimizer.param_groups:
+            if 'classifier' in param_group['name'] or 'fc' in param_group['name'] or 'linear' in param_group['name']:
+                param_group['lr'] = lr * 10  # 10x higher lr for last layer
+            else:
+                param_group['lr'] = lr
+    else:
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr

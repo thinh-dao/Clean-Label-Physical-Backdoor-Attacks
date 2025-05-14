@@ -221,7 +221,36 @@ class MixedAugment(torch.nn.Module):
         mask[grid_batch, grid_x, grid_y] = 0
         x = x * mask.unsqueeze(1)
         return x
+
+    @staticmethod
+    def rand_rotate(x, ratio=15.0): # [-180, 180], 90: anticlockwise 90 degree
+        theta = (torch.rand(1) - 0.5) * 2 * ratio / 180 * float(np.pi)  # Single random value for batch
+        theta = [[[torch.cos(theta), torch.sin(-theta), 0],
+                 [torch.sin(theta), torch.cos(theta), 0],]] * x.shape[0]  # Repeat for batch size
+        theta = torch.tensor(theta, dtype=torch.float)
+        grid = F.affine_grid(theta, x.shape, align_corners=True).to(x.device)
+        x = F.grid_sample(x, grid, align_corners=True)
+        return x
     
+    @staticmethod
+    def rand_crop(x, ratio=0.125):  # Using default ratio from ParamDiffAug
+        # The image is padded on its surrounding and then cropped.
+        shift_x, shift_y = int(x.size(2) * ratio + 0.5), int(x.size(3) * ratio + 0.5)
+        # Generate single random translation for entire batch
+        translation_x = torch.randint(-shift_x, shift_x + 1, size=[1, 1, 1], device=x.device).expand(x.size(0), -1, -1)
+        translation_y = torch.randint(-shift_y, shift_y + 1, size=[1, 1, 1], device=x.device).expand(x.size(0), -1, -1)
+        
+        grid_batch, grid_x, grid_y = torch.meshgrid(
+            torch.arange(x.size(0), dtype=torch.long, device=x.device),
+            torch.arange(x.size(2), dtype=torch.long, device=x.device),
+            torch.arange(x.size(3), dtype=torch.long, device=x.device),
+        )
+        grid_x = torch.clamp(grid_x + translation_x + 1, 0, x.size(2) + 1)
+        grid_y = torch.clamp(grid_y + translation_y + 1, 0, x.size(3) + 1)
+        x_pad = F.pad(x, [1, 1, 1, 1, 0, 0, 0, 0])
+        x = x_pad.permute(0, 2, 3, 1).contiguous()[grid_batch, grid_x, grid_y].permute(0, 3, 1, 2)
+        return x
+
     def forward(x, policy='color,translation,cutout', channels_first=True):
         AUGMENT_FNS = {
             'color': [MixedAugment.rand_brightness, MixedAugment.rand_saturation, MixedAugment.rand_contrast],
@@ -244,6 +273,3 @@ class MixedAugment(torch.nn.Module):
                 x = x.permute(0, 2, 3, 1)
             x = x.contiguous()
         return x
-
-
-    

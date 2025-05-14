@@ -5,7 +5,6 @@ PIN_MEMORY = True
 NON_BLOCKING = True
 BENCHMARK = True
 MAX_THREADING = 32
-NUM_CLASSES = 201
 FINETUNING_LR_DROP = 0.01
 
 SHARING_STRATEGY = 'file_descriptor'  # file_system or file_descriptor

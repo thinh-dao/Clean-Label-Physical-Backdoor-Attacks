@@ -8,13 +8,13 @@ import torchvision
 import matplotlib.pyplot as plt
 import dlib
 import cv2
+
 from imutils import face_utils
-torchvision.disable_beta_transforms_warning()
 from torchvision.transforms import v2 as transforms
 from PIL import Image
 from torchvision.datasets import DatasetFolder
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from ..consts import PIN_MEMORY, NUM_CLASSES
+from ..consts import PIN_MEMORY
 
 data_transforms = {
     'train':
@@ -42,6 +42,7 @@ def pil_loader(path: str) -> Image.Image:
     # Open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
     with open(path, "rb") as f:
         img = Image.open(f)
+        # Explicitly convert to RGB to remove alpha channel if present
         return np.array(img.convert("RGB"))
 
 def default_loader(path: str) -> Any:
@@ -87,11 +88,13 @@ def construct_datasets(path, normalize=False):
 class Subset(torch.utils.data.Dataset):
     """Overwrite subset class to provide class methods of main class."""
 
-    def __init__(self, dataset, indices, transform=None) -> None:
+    def __init__(self, dataset, indices, transform=None, target_transform=None) -> None:
         self.dataset = copy.deepcopy(dataset)
         self.indices = indices
         if transform != None:
             self.dataset.transform = transform
+        if target_transform != None:
+            self.dataset.target_transform = target_transform
     
     def get_target(self, index):
         """Return only the target and its id.
@@ -136,7 +139,7 @@ class PoisonSet(torch.utils.data.Dataset):
         (sample, target, index) = self.dataset[idx]
         lookup = self.poison_lookup.get(idx)
         if lookup is not None:
-            sample += self.poison_delta[lookup, :, :, :]
+            sample += self.poison_delta[lookup, :, :, :].detach()
         
         if self.transform is not None:
             sample = self.transform(sample)
@@ -306,7 +309,11 @@ class ImageDataset(DatasetFolder):
         """
         path, target = self.samples[index]
         sample = self.loader(path)
-
+        
+        # Remove alpha channel if present
+        if isinstance(sample, np.ndarray) and sample.shape[-1] == 4:
+            sample = sample[..., :3]
+        
         if self.transform is not None:
             sample = self.transform(sample)
         if self.target_transform is not None:
@@ -328,29 +335,7 @@ class ImageDataset(DatasetFolder):
         if self.target_transform is not None:
             target = self.target_transform(target)
 
-        return target, index
-    
-class CombinedDataset(DatasetFolder):
-    def __init__(self, dataset1, dataset2):
-        self.dataset1 = dataset1
-        self.dataset2 = dataset2
-        self.length_dataset1 = len(dataset1)
-        self.length_dataset2 = len(dataset2)
-
-    def __len__(self):
-        return self.length_dataset1 + self.length_dataset2
-
-    def __getitem__(self, index):
-        if index < self.length_dataset1:
-            img, target, idx = self.dataset1[index]
-            return img, target, idx
-        else:
-            # Adjust the index to access the correct element in dataset2
-            index_in_dataset2 = index - self.length_dataset1
-            img = self.dataset2[index_in_dataset2][0]
-            target = NUM_CLASSES
-            return img, target, index
-        
+        return target, index        
 
 """Write a PyTorch dataset into RAM."""
 class CachedDataset(torch.utils.data.Dataset):
@@ -837,3 +822,11 @@ class PatchDataset(torch.utils.data.Dataset):
         M, _ = cv2.findHomography(src_points, dst_points)
         transformed_trigger = cv2.warpPerspective(self.trigger_img, M, (224, 224), None, cv2.INTER_LINEAR, cv2.BORDER_CONSTANT)
         return transformed_trigger.astype(np.uint8)
+
+class LabelPoisonTransform:
+    def __init__(self, mapping=None):
+        self.mapping = mapping or {}
+    
+    def __call__(self, target):
+        # Return mapped value or original target if not in mapping
+        return self.mapping.get(target, target)

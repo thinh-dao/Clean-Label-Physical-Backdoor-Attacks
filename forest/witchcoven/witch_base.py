@@ -5,14 +5,12 @@ import random
 
 import torch.distributed
 from ..utils import cw_loss, write, gauss_smooth, min_max_normalize
-from ..consts import NON_BLOCKING, BENCHMARK, FINETUNING_LR_DROP, NORMALIZE
+from ..consts import NON_BLOCKING, BENCHMARK, NORMALIZE, FINETUNING_LR_DROP
 torch.backends.cudnn.benchmark = BENCHMARK
 from ..victims.victim_single import _VictimSingle
 from ..victims.batched_attacks import construct_attack
 from ..victims.training import _split_data
 from forest.data.datasets import normalization
-
-
 
 class _Witch():
     """Brew poison with given arguments.
@@ -96,10 +94,10 @@ class _Witch():
     def get_target_feature(self, kettle, poison_delta=None):        
         with torch.no_grad():
             target_class = kettle.poison_setup['target_class']
-            target_class_idcs = kettle.trainset_dist[target_class]
+            target_class_idxs = kettle.trainset_dist[target_class]
             
             target_feats = []
-            for idx in target_class_idcs:
+            for idx in target_class_idxs:
                 img, _, _ = kettle.trainset[idx]
                 poison_slice = kettle.poison_lookup.get(idx)
                 if (poison_slice is not None) and poison_delta is not None:
@@ -130,8 +128,15 @@ class _Witch():
         """Implement common initialization operations for brewing."""
         self.sources_train = torch.stack([data[0] for data in kettle.source_trainset], dim=0).to(**self.setup)
         self.true_classes = torch.tensor([data[1] for data in kettle.source_trainset]).to(device=self.setup['device'], dtype=torch.long)
-        self.target_classes = torch.tensor([kettle.poison_setup['target_class']] * kettle.source_train_num).to(device=self.setup['device'], dtype=torch.long)
+
+        if kettle.args.threatmodel != 'all-to-all':
+            self.target_classes = torch.tensor([kettle.poison_setup['target_class']] * kettle.source_train_num).to(device=self.setup['device'], dtype=torch.long)
+        else:
+            self.target_classes = torch.tensor([kettle.mapping[self.true_classes[i].item()] for i in range(len(self.true_classes))]).to(device=self.setup['device'], dtype=torch.long)
         
+        # print(self.true_classes)
+        # print(self.target_classes)
+
         if NORMALIZE:
             self.sources_train = normalization(self.sources_train)
 
@@ -230,7 +235,7 @@ class _Witch():
         trigger_loss = 0
         target_class = kettle.poison_setup['target_class']
         transform = kettle.trainset.transform
-        victim.eval()
+        victim.eval(victim.model)
         with torch.no_grad():
             for idc in kettle.triggerset_dist[target_class]:
                 inputs, labels, idcs = kettle.triggerset[idc]
@@ -249,20 +254,23 @@ class _Witch():
         dm, ds = kettle.dm.to(device=torch.device('cpu')), kettle.ds.to(device=torch.device('cpu'))
         poison_bounds = torch.zeros_like(poison_delta)
         
-        self.setup_featreg(victim, kettle)
-        self.compute_source_gradient(victim, kettle)
+        # self.setup_featreg(victim, kettle)
+        if self.args.recipe == 'gradient-matching':
+            self.compute_source_gradient(victim, kettle)
         
         if self.args.full_data:
             dataloader = kettle.trainloader
         else:
             dataloader = kettle.poisonloader
 
-        if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
+        if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
             poison_delta.requires_grad_()
             if self.args.attackoptim in ['Adam', 'signAdam']:
                 att_optimizer = torch.optim.Adam([poison_delta], lr=self.tau0, weight_decay=0)
-            else:
+            elif self.args.attackoptim in ['momSGD', 'momPGD']:
                 att_optimizer = torch.optim.SGD([poison_delta], lr=self.tau0, momentum=0.9, weight_decay=0)
+            elif self.args.attackoptim in ['SGD']:
+                att_optimizer = torch.optim.SGD([poison_delta], lr=self.tau0, momentum=0.9, weight_decay=5e-4, nesterov=True)
             if self.args.scheduling:
                 if self.args.poison_scheduler == 'linear':
                     scheduler = torch.optim.lr_scheduler.MultiStepLR(att_optimizer, milestones=[self.args.attackiter // 2.667, self.args.attackiter // 1.6,
@@ -280,12 +288,10 @@ class _Witch():
         
         for step in range(self.args.attackiter):
             source_losses = 0
-            feat_losses = 0
                 
             for batch, example in enumerate(dataloader):
-                loss, feat_loss, _ = self._batched_step(poison_delta, poison_bounds, example, victim, kettle)
+                loss, _ = self._batched_step(poison_delta, poison_bounds, example, victim, kettle)
                 source_losses += loss
-                feat_losses += feat_loss
                 
                 if self.args.dryrun:
                     break
@@ -294,41 +300,42 @@ class _Witch():
             # For the momentum optimizers, we only accumulate gradients for all poisons
             # and then use optimizer.step() for the update. This is math. equivalent
             # and makes it easier to let pytorch track momentum.
-            if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
-                if self.args.attackoptim in ['momPGD', 'signAdam']:
-                    poison_delta.grad.sign_()
-                
-                att_optimizer.step()
-                
-                if self.args.scheduling:
-                    scheduler.step()
-                att_optimizer.zero_grad(set_to_none=False)
-                
-                if self.args.visreg is not None and "soft" in self.args.visreg:
-                    with torch.no_grad():
-                        # Projection Step
-                        poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
-                        poison_delta.data = torch.clamp(poison_delta.data, min=-poison_bounds, max=1.0 - poison_bounds)
+            if self.args.attackoptim in ['momPGD', 'signAdam']:
+                poison_delta.grad.sign_()
+            
+            att_optimizer.step()
+            
+            if self.args.scheduling:
+                scheduler.step()
+            att_optimizer.zero_grad(set_to_none=False)
+            
+            if self.args.visreg is not None and "soft" in self.args.visreg:
+                with torch.no_grad():
+                    # Projection Step
+                    # First clamp to eps bound
+                    poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
+                    # Then clamp to valid image range
+                    poison_delta.data = torch.clamp(poison_delta.data, 
+                                                    min=-dm / ds - poison_bounds, 
+                                                    max=(1 - dm) / ds - poison_bounds)
 
-                else:
-                    with torch.no_grad():
-                        # Projection Step
-                        poison_delta.data = torch.max(torch.min(poison_delta, self.args.eps /
-                                                                ds / 255), -self.args.eps / ds / 255)
-                        poison_delta.data = torch.max(torch.min(poison_delta, (1 - dm) / ds -
-                                                                poison_bounds), -dm / ds - poison_bounds)
+            else:
+                with torch.no_grad():
+                    # Projection Step
+                    # First clamp to eps bound
+                    poison_delta.data = torch.clamp(poison_delta.data, min=-self.args.eps / ds / 255, max=self.args.eps / ds / 255)
+                    # Then clamp to valid image range
+                    poison_delta.data = torch.clamp(poison_delta.data, 
+                                                    min=-dm / ds - poison_bounds, 
+                                                    max=(1 - dm) / ds - poison_bounds)
 
             source_losses = source_losses / (batch + 1)
             with torch.no_grad():
                 visual_losses = torch.mean(torch.linalg.matrix_norm(poison_delta))
-                feat_losses = feat_losses / (batch + 1)
             
             if step % 10 == 0 or step == (self.args.attackiter - 1):
                 lr = att_optimizer.param_groups[0]['lr']
-                if self.target_feature != None:
-                    write(f'Iteration {step} - lr: {lr} | Passenger loss: {source_losses:2.4f} | Visual loss: {visual_losses:2.4f} | Feature loss: {feat_losses:2.4f}', self.args.output)
-                else:
-                    write(f'Iteration {step} - lr: {lr} | Passenger loss: {source_losses:2.4f} | Visual loss: {visual_losses:2.4f}', self.args.output)
+                write(f'Iteration {step} - lr: {lr} | Passenger loss: {source_losses:2.4f} | Visual loss: {visual_losses:2.4f}', self.args.output)
                 
             # Default not to step 
             if self.args.step:
@@ -342,22 +349,24 @@ class _Witch():
 
             if self.args.retrain_scenario != None:
                 if step % self.args.retrain_iter == 0 and step != 0 and step != self.args.attackiter - 1:
-                    write("\nRetraining at iteration {}".format(step), self.args.output)
-                    write(f'Model reinitialized and retrain with {self.args.scenario} scenario', self.args.output)
+                    # victim.retrain(kettle, poison_delta, max_epoch=self.args.retrain_max_epoch)
+                    print("Retrainig the base model at iteration {}".format(step))
+                    poison_delta.detach()
+                    
                     if self.args.retrain_scenario == 'from-scratch':
                         victim.initialize()
-                    elif self.args.retrain_scenario in ['transfer', 'finetuning']:
+                        print('Model reinitialized to random seed.')
+                    elif self.args.retrain_scenario == 'finetuning':
                         if self.args.load_feature_repr:
                             victim.load_feature_representation()
-                        if self.args.retrain_scenario == 'finetuning':
-                            victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
+                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
+                        print('Completely warmstart finetuning!')
 
-                    victim._iterate(kettle, poison_delta=poison_delta.detach(), max_epoch=self.args.retrain_max_epoch)
+                    victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)
                     write('Retraining done!\n', self.args.output)
                     
-                    # self.args.featreg = featreg
-                    self.setup_featreg(victim, kettle, poison_delta)
-                    self.compute_source_gradient(victim, kettle)
+                    if self.args.recipe == 'gradient-matching':
+                        self.compute_source_gradient(victim, kettle)
 
         return poison_delta, source_losses
 
@@ -378,11 +387,6 @@ class _Witch():
             delta_slice.requires_grad_()  # TRACKING GRADIENTS FROM HERE
             poison_images = inputs[batch_positions]
             inputs[batch_positions] += delta_slice
-            
-            if self.target_feature != None:
-                feat_loss = self.get_featloss(inputs)
-            else:
-                feat_loss = torch.tensor(0)
 
             # Add additional clean data if mixing during the attack:
             if self.args.pmix:
@@ -414,8 +418,6 @@ class _Witch():
                                                               temp_sources, temp_fake_label, steps=victim.defs.novel_defense['steps'])
                 inputs = inputs + delta  # Kind of a reparametrization trick
 
-
-
             # Define the loss objective and compute gradients
             if self.args.source_criterion in ['cw', 'carlini-wagner']:
                 loss_fn = cw_loss
@@ -443,15 +445,16 @@ class _Witch():
                 delta_slice = self._pgd_step(delta_slice, poison_images, self.tau0, kettle.dm, kettle.ds)
                 # Return slice to CPU:
                 poison_delta[poison_slices] = delta_slice.detach().to(device=torch.device('cpu'))
-            elif self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
+            elif self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
                 poison_delta.grad[poison_slices] = delta_slice.grad.detach().to(device=torch.device('cpu'))
-                poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
             else:
                 raise NotImplementedError('Unknown attack optimizer.')
+            
+            poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
         else:
-            loss, feat_loss, prediction = torch.tensor(0), torch.tensor(0), torch.tensor(0)
+            loss, prediction = torch.tensor(0), torch.tensor(0)
 
-        return loss.item(), feat_loss.item(), prediction.item()
+        return loss.item(), prediction.item()
 
     def _define_objective():
         """Implement the closure here."""

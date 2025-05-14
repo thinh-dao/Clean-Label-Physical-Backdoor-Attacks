@@ -2,7 +2,9 @@
 from .witch_matching import WitchGradientMatching, WitchGradientMatchingNoisy, WitchGradientMatchingHidden, WitchMatchingMultiSource
 from .witch_htbd import WitchHTBD
 from .witch_clbd import WitchLabelConsistent
-from .witch_meta import WitchMetaPoison, WitchMetaPoison_v3, WitchMetaPoisonHigher
+from .witch_meta import WitchMetaPoison, WitchMetaPoison_v3, WitchMetaPoisonHigher, WitchMetaPoisonFirstOrder
+from .witch_base import _Witch
+from .witch_mttp import WitchMTTP, WitchMTTP_Tesla
 
 import torch
 
@@ -20,12 +22,18 @@ def Witch(args, setup=dict(device=torch.device('cpu'), dtype=torch.float)):
         return WitchMetaPoisonHigher(args, setup)
     elif args.recipe == 'meta-v3':
         return WitchMetaPoison_v3(args, setup)
+    elif args.recipe == 'meta-first-order':
+        return WitchMetaPoisonFirstOrder(args, setup)
     elif args.recipe == 'gradient-matching-mt':
         return WitchMatchingMultiSource(args, setup)
     elif args.recipe == 'hidden-trigger':
         return WitchHTBD(args, setup)
     elif args.recipe == 'label-consistent':
         return WitchLabelConsistent(args, setup)
+    elif args.recipe == 'mttp':
+        return WitchMTTP(args, setup)
+    elif args.recipe == 'mttp-tesla':
+        return WitchMTTP_Tesla(args, setup)
     elif args.recipe == 'naive':
         return None
     else:

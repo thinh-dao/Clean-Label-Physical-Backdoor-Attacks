@@ -10,7 +10,7 @@ import socket
 import forest
 
 from forest.utils import write, set_random_seed
-from forest.consts import BENCHMARK, NUM_CLASSES, SHARING_STRATEGY
+from forest.consts import BENCHMARK, SHARING_STRATEGY
 
 torch.backends.cudnn.benchmark = BENCHMARK
 torch.multiprocessing.set_sharing_strategy(SHARING_STRATEGY)
@@ -61,7 +61,7 @@ if __name__ == "__main__":
             print(f'CPUs: {torch.get_num_threads()}, GPUs: {torch.cuda.device_count()} on {socket.gethostname()}')
     
     num_classes = len(os.listdir(os.path.join("datasets", args.dataset, 'train')))
-    model = forest.Victim(args, num_classes=NUM_CLASSES, setup=setup) # Initialize model and loss_fn
+    model = forest.Victim(args, num_classes=num_classes, setup=setup) # Initialize model and loss_fn
     data = forest.Kettle(args, model.defs.batch_size, model.defs.augmentations,
                         model.defs.mixing_method, setup=setup) # Set up trainloader, validloader, poisonloader, poison_ids, trainset/poisonset/source_testset
     witch = forest.Witch(args, setup=setup)

@@ -18,7 +18,7 @@ class WitchGradientMatching(_Witch):
     In the poison'd entrails throw.”
 
     """
-    def _define_objective(self, inputs, labels, criterion, sources, target_classes, true_classes, tau=16/225):
+    def _define_objective(self, inputs, labels, criterion, sources, target_classes, true_classes):
         """Implement the closure here."""
         def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm, perturbations):
             """This function will be evaluated on all GPUs."""  # noqa: D401
@@ -30,7 +30,7 @@ class WitchGradientMatching(_Witch):
             poison_grad = torch.autograd.grad(poison_loss, differentiable_params, retain_graph=True, create_graph=True)
 
             passenger_loss = self._passenger_loss(poison_grad, source_grad, source_clean_grad, source_gnorm)
-            regularized_loss = self.get_regularized_loss(perturbations, inputs, tau)
+            regularized_loss = self.get_regularized_loss(perturbations, inputs, tau=self.args.eps/255)
             
             attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
             
@@ -70,7 +70,9 @@ class WitchGradientMatching(_Witch):
                 passenger_loss += 0.5 * (source_grad[i] - poison_grad[i]).pow(2).sum()
             elif self.args.loss == 'MSE':
                 passenger_loss += torch.nn.functional.mse_loss(source_grad[i], poison_grad[i])
-
+            elif self.args.loss == 'MSE+cosine':
+                passenger_loss += torch.nn.functional.mse_loss(source_grad[i], poison_grad[i]) + torch.nn.functional.cosine_similarity(source_grad[i].flatten(), poison_grad[i].flatten(), dim=0)
+                
             if self.args.loss in SIM_TYPE or self.args.normreg != 0:
                 poison_norm += poison_grad[i].pow(2).sum()
 
@@ -117,11 +119,12 @@ class WitchGradientMatching(_Witch):
             max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
             relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
             # regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean()
-            regularized_loss = torch.clamp(perturbations.abs() - tau, min=0.0).mean()
+            # regularized_loss = torch.clamp(perturbations.abs() - tau, min=0.0).mean()
+            regularized_loss = torch.linalg.norm(perturbations.abs().flatten() - tau.flatten(), ord=1).mean()
         elif self.args.visreg == 'TV+soft_l_inf':
             max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
             relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
-            regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean() + 5 * total_variation_loss(perturbations)
+            regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean() + total_variation_loss(perturbations)
         elif self.args.visreg == 'UTV+soft_l_inf':
             max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
             relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
@@ -295,14 +298,14 @@ class WitchGradientMatchingHidden(WitchGradientMatching):
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
                 delta_slice = self._pgd_step(delta_slice, poison_images, self.tau0, kettle.dm, kettle.ds)
-
                 # Return slice to CPU:
                 poison_delta[poison_slices] = delta_slice.detach().to(device=torch.device('cpu'))
-            elif self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
+            elif self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
                 poison_delta.grad[poison_slices] = delta_slice.grad.detach().to(device=torch.device('cpu'))
-                poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
             else:
                 raise NotImplementedError('Unknown attack optimizer.')
+            
+            poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
         else:
             loss, prediction = torch.tensor(0), torch.tensor(0)
 

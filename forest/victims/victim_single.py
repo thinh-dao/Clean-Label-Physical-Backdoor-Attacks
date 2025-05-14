@@ -3,14 +3,15 @@ import torch
 import numpy as np
 import warnings
 import copy
+import os
 
 from torch.utils.data import TensorDataset, DataLoader
 from math import ceil
 from .models import get_model
-from .training import get_optimizers, run_step
+from .training import get_optimizers, run_step, run_validation, check_sources, check_sources_all_to_all, check_suspicion
 from ..hyperparameters import training_strategy
 from ..utils import set_random_seed, write
-from ..consts import BENCHMARK, SHARING_STRATEGY, FINETUNING_LR_DROP
+from ..consts import BENCHMARK, SHARING_STRATEGY
 torch.backends.cudnn.benchmark = BENCHMARK
 torch.multiprocessing.set_sharing_strategy(SHARING_STRATEGY)
 
@@ -35,17 +36,24 @@ class _VictimSingle(_VictimBase):
             
         set_random_seed(self.model_init_seed)
         self.model, self.defs, self.optimizer, self.scheduler = self._initialize_model(self.args.net[0], mode=self.args.scenario)
+        
+        if self.args.scenario == 'transfer':
+            self.freeze_feature_extractor()
+            self.eval()
+            print('Features frozen.')
             
         self.model.to(**self.setup)
-        if self.setup['device'] == 'cpu' and torch.cuda.device_count() > 1:
+        if self.setup['device'] != 'cpu' and torch.cuda.device_count() > 1:
             self.model = torch.nn.DataParallel(self.model)
             self.model.frozen = self.model.module.frozen
+
         write(f'{self.args.net[0]} model initialized with random key {self.model_init_seed}.', self.args.output)
         print(f'{self.args.net[0]} model initialized with random key {self.model_init_seed}.')
         write(repr(self.defs), self.args.output)
         print(repr(self.defs))
 
     def reinitialize_last_layer(self, reduce_lr_factor=1.0, seed=None, keep_last_layer=False):
+        """Reinitialize the last layer of the model and/or update training parameters."""
         if not keep_last_layer:
             if self.args.model_seed is None:
                 if seed is None:
@@ -58,19 +66,14 @@ class _VictimSingle(_VictimBase):
 
             # We construct a full replacement model, so that the seed matches up with the initial seed,
             # even if all of the model except for the last layer will be immediately discarded.
-            replacement_model = get_model(self.args.net[0], num_classes=self.num_classes, pretrained=True)
-            
-            if isinstance(self.model, torch.nn.DataParallel) or isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-                frozen = self.model.module.frozen
-                self.model = torch.nn.Sequential(*list(self.model.module.children())[:-1], torch.nn.Flatten(), list(replacement_model.children())[-1])
-            else:
-                # Rebuild model with new last layer
-                frozen = self.model.frozen
-                self.model = torch.nn.Sequential(*list(self.model.children())[:-1], torch.nn.Flatten(), list(replacement_model.children())[-1])
-            
-            self.model.frozen = frozen  
+            replacement_model = get_model(self.args.net[0], self.args.dataset, pretrained=self.args.pretrained_model)
+
+            # Rebuild model with new last layer
+            frozen = self.model.frozen
+            self.model = torch.nn.Sequential(*list(self.model.children())[:-1], torch.nn.Flatten(), list(replacement_model.children())[-1])
+            self.model.frozen = frozen
             self.model.to(**self.setup)
-            if self.setup['device'] == 'cpu'and torch.cuda.device_count() > 1:
+            if torch.cuda.device_count() > 1:
                 self.model = torch.nn.DataParallel(self.model)
                 self.model.frozen = self.model.module.frozen
 
@@ -79,30 +82,57 @@ class _VictimSingle(_VictimBase):
         self.defs = training_strategy(self.args.net[0], self.args)
         self.defs.lr *= reduce_lr_factor
         self.optimizer, self.scheduler = get_optimizers(self.model, self.args, self.defs)
-        write(f'{self.args.net[0]} last layer re-initialized with random key {self.model_init_seed}.', self.args.output)
-        write(repr(self.defs), self.args.output)
+        print(f'{self.args.net[0]} last layer re-initialized with random key {self.model_init_seed}.')
+        print(repr(self.defs))
 
     def save_feature_representation(self):
         self.orginal_model = copy.deepcopy(self.model)
 
     def load_feature_representation(self):
-        self.model = copy.deepcopy(self.orginal_model)
+        if isinstance(self.model, torch.nn.DataParallel) or isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
+            self.model.module.load_state_dict(self.orginal_model.module.state_dict())
+        else:
+            self.model.load_state_dict(self.orginal_model.state_dict())
+
+    def freeze_feature_extractor(self):
+        """Freezes all parameters and then unfreeze the last layer."""
+        if isinstance(self.model, torch.nn.DataParallel) or isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
+            self.model.module.frozen = True
+            for param in self.model.module.parameters():
+                param.requires_grad = False
+    
+            for param in list(self.model.module.children())[-1].parameters():
+                param.requires_grad = True
+        
+        else:
+            self.model.frozen = True
+            for param in self.model.parameters():
+                param.requires_grad = False
+    
+            for param in list(self.model.children())[-1].parameters():
+                param.requires_grad = True
+
+    def eval(self, dropout=False):
+        """Switch everything into evaluation mode."""
+        def apply_dropout(m):
+            """https://discuss.pytorch.org/t/dropout-at-test-time-in-densenet/6738/6."""
+            if type(m) == torch.nn.Dropout:
+                m.train()
+        self.model.eval()
+        if dropout:
+            self.model.apply(apply_dropout)
 
     """ METHODS FOR (CLEAN) TRAINING AND TESTING OF BREWED POISONS"""
     def _iterate(self, kettle, poison_delta, max_epoch=None, stats=None):
         """Validate a given poison by training the model and checking source accuracy."""
         if max_epoch is None:
             max_epoch = self.defs.epochs
-
-        if self.args.defense != None and 'EPIC' in self.args.defense:
-            times_selected = torch.zeros(len(kettle.trainset))
-        else:
-            times_selected = None
             
         single_setup = (self.model, self.defs, self.optimizer, self.scheduler)
         self.defs.epochs = 1 if self.args.dryrun else max_epoch
         for self.epoch in range(1, max_epoch+1):
-            run_step(kettle, poison_delta, self.epoch, *single_setup, stats=stats, times_selected=times_selected)
+            print(f"Training Epoch {self.epoch}...")
+            run_step(kettle, poison_delta, self.epoch, *single_setup, stats=stats)
             if self.args.dryrun:
                 break
 
@@ -114,23 +144,13 @@ class _VictimSingle(_VictimBase):
         if self.epoch > self.defs.epochs + 1:
             self.epoch = 1
             write('Model reset to epoch 0.', self.args.output)
-            self._initialize_model(self.args.net[0], mode=self.args.scenario)
+            self.model, self.defs, self.optimizer, self.scheduler = self._initialize_model(self.args.net[0], mode=self.args.scenario)
             self.model.to(**self.setup)
             if self.setup['device'] == 'cpu' and torch.cuda.device_count() > 1:
                 self.model = torch.nn.DataParallel(self.model)
                 self.model.frozen = self.model.module.frozen
 
     """ Various Utilities."""
-    def eval(self, dropout=False):
-        """Switch everything into evaluation mode."""
-        def apply_dropout(m):
-            """https://discuss.pytorch.org/t/dropout-at-test-time-in-densenet/6738/6."""
-            if type(m) == torch.nn.Dropout:
-                m.train()
-        self.model.eval()
-        if dropout:
-            self.model.apply(apply_dropout)
-
     def reset_learning_rate(self):
         """Reset scheduler object to initial state."""
         _, _, self.optimizer, self.scheduler = self._initialize_model(self.args.net[0], mode=self.args.scenario)
@@ -140,31 +160,6 @@ class _VictimSingle(_VictimBase):
         if criterion is None:
             criterion = self.loss_fn
         differentiable_params = [p for p in self.model.parameters() if p.requires_grad]
-        
-        # source_dataset = TensorDataset(source_images, source_labels)
-        # source_loader = DataLoader(dataset=source_dataset, batch_size=self.args.source_gradient_batch * 2, num_workers=4, pin_memory=True, shuffle=True)
-        # repel_dataset = TensorDataset(repel_images, repel_labels)
-        # repel_dataloader = DataLoader(dataset=repel_dataset, batch_size=self.args.source_gradient_batch * 2, num_workers=4, pin_memory=True, shuffle=True)
-
-        # source_loss = 0
-        # for inputs, targets in source_loader:
-        #     inputs = inputs.cuda()
-        #     targets = targets.cuda()
-        #     with torch.cuda.amp.autocast():  # Mixed precision
-        #         source_loss += criterion(self.model(inputs), targets)
-
-        # repel_loss = 0
-        # for inputs, targets in repel_dataloader:
-        #     inputs = inputs.cuda()
-        #     targets = targets.cuda()
-        #     with torch.cuda.amp.autocast():  # Mixed precision
-        #         repel_loss += criterion(self.model(inputs), targets)
-
-        # adv_loss = 10 * source_loss - repel_loss
-        # print(source_loss)
-        # print(repel_loss)
-        # print(adv_loss)
-        # gradients = torch.autograd.grad(adv_loss, differentiable_params, only_inputs=True)
 
         # Select sources with maximum gradient
         if selection == 'max_gradient':
@@ -305,6 +300,26 @@ class _VictimSingle(_VictimBase):
         grad_norm = grad_norm.sqrt()
     
         return gradients, grad_norm
+
+    def load_trained_model(self, kettle):
+        load_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
+        
+        if os.path.exists(load_path):
+            write(f'Model {self.args.net[0]} already exists, skipping training.', self.args.output)
+            if isinstance(self.model, torch.nn.DataParallel):
+                self.model.module.load_state_dict(torch.load(load_path))
+            else:
+                self.model.load_state_dict(torch.load(load_path))
+            self._one_step_validation(self.model, kettle)
+        else:
+            write(f'Model {self.args.net[0]} not found, training from scratch.', self.args.output)
+            self._iterate(kettle, poison_delta=None, max_epoch=self.args.train_max_epoch)
+
+            if self.args.save_clean_model:
+                if isinstance(self.model, torch.nn.DataParallel):
+                    self.save_model(self.model.module, load_path)
+                else:
+                    self.save_model(self.model, load_path)
 
     def compute(self, function, *args):
         r"""Compute function on the given optimization problem, defined by criterion \circ model.

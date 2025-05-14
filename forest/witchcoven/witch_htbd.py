@@ -3,7 +3,7 @@
 import torch
 import torchvision
 from PIL import Image
-from ..utils import bypass_last_layer, cw_loss, write
+from ..utils import bypass_last_layer, cw_loss, write, total_variation_loss, upwind_tv
 from ..consts import BENCHMARK, NON_BLOCKING, FINETUNING_LR_DROP, NORMALIZE
 from forest.data import datasets
 torch.backends.cudnn.benchmark = BENCHMARK
@@ -19,12 +19,14 @@ class WitchHTBD(_Witch):
 
         validated_batch_size = max(min(kettle.args.pbatch, len(kettle.poisonset)), 1)
 
-        if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
+        if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
             # poison_delta.requires_grad_()
             if self.args.attackoptim in ['Adam', 'signAdam']:
                 att_optimizer = torch.optim.Adam([poison_delta], lr=self.tau0, weight_decay=0)
-            else:
+            elif self.args.attackoptim in ['momSGD', 'momPGD']:
                 att_optimizer = torch.optim.SGD([poison_delta], lr=self.tau0, momentum=0.9, weight_decay=0)
+            elif self.args.attackoptim in ['SGD']:
+                att_optimizer = torch.optim.SGD([poison_delta], lr=self.tau0, momentum=0.9, weight_decay=5e-4, nesterov=True)
                 
             if self.args.scheduling:
                 if self.args.poison_scheduler == 'linear':
@@ -73,77 +75,67 @@ class WitchHTBD(_Witch):
             # For the momentum optimizers, we only accumulate gradients for all poisons
             # and then use optimizer.step() for the update. This is math. equivalent
             # and makes it easier to let pytorch track momentum.
+            if self.args.attackoptim in ['momPGD', 'signAdam']:
+                poison_delta.grad.sign_()
             
-            # if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
-            #     if self.args.attackoptim in ['momPGD', 'signAdam']:
-            #         poison_delta.grad.sign_()
-            #     att_optimizer.step()
-            #     if self.args.scheduling:
-            #         scheduler.step()
-            #     att_optimizer.zero_grad(set_to_none=False)
-            #     with torch.no_grad():
-            #         # Projection Step
-            #         poison_delta.data = torch.max(torch.min(poison_delta, self.args.eps /
-            #                                                 ds / 255), -self.args.eps / ds / 255)
-            #         poison_delta.data = torch.max(torch.min(poison_delta, (1 - dm) / ds -
-            #                                                 poison_bounds), -dm / ds - poison_bounds)
-                    
-            if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
-                if self.args.attackoptim in ['momPGD', 'signAdam']:
-                    poison_delta.grad.sign_()
-                att_optimizer.step()
-                if self.args.scheduling:
-                    scheduler.step()
-                att_optimizer.zero_grad(set_to_none=False)
-                
-                if self.args.visreg != None and "soft" in self.args.visreg:
-                    with torch.no_grad():
-                        # Projection Step
-                        poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
-                        poison_delta.data = torch.clamp(poison_delta.data, min=-poison_bounds, max=1.0 - poison_bounds)
+            att_optimizer.step()
+            
+            if self.args.scheduling:
+                scheduler.step()
+            att_optimizer.zero_grad(set_to_none=False)
+            
+            if self.args.visreg is not None and "soft" in self.args.visreg:
+                with torch.no_grad():
+                    # Projection Step
+                    # poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
+                    poison_delta.data = torch.clamp(poison_delta.data, min=-poison_bounds, max=1.0 - poison_bounds)
 
-                else:
-                    with torch.no_grad():
-                        # Projection Step
-                        poison_delta.data = torch.max(torch.min(poison_delta, self.args.eps /
-                                                                ds / 255), -self.args.eps / ds / 255)
-                        poison_delta.data = torch.max(torch.min(poison_delta, (1 - dm) / ds -
-                                                                poison_bounds), -dm / ds - poison_bounds)
+            else:
+                with torch.no_grad():
+                    # Projection Step
+                    poison_delta.data = torch.max(torch.min(poison_delta, self.args.eps /
+                                                            ds / 255), -self.args.eps / ds / 255)
+                    poison_delta.data = torch.max(torch.min(poison_delta, (1 - dm) / ds -
+                                                            poison_bounds), -dm / ds - poison_bounds)
 
+            source_losses = source_losses / (batch + 1)
             with torch.no_grad():
                 visual_losses = torch.mean(torch.linalg.matrix_norm(poison_delta))
-                
-            source_losses = source_losses / (batch + 1)
+            
             if step % 10 == 0 or step == (self.args.attackiter - 1):
-                if self.args.attackoptim in ['PGD', 'GD']:
-                    lr = self.tau0
-                else:
-                    lr = att_optimizer.param_groups[0]['lr']
-                write(f'Iteration {step} | Poisoning learning rate: {lr} | Passenger loss: {source_losses:2.4f} | Visual loss: {visual_losses:2.4f}', self.args.output)
-
+                lr = att_optimizer.param_groups[0]['lr']
+                write(f'Iteration {step} - lr: {lr} | Passenger loss: {source_losses:2.4f} | Visual loss: {visual_losses:2.4f}', self.args.output)
+                
+            # Default not to step 
             if self.args.step:
                 if self.args.clean_grad:
-                    victim.step(kettle, None, self.sources, self.true_classes)
+                    victim.step(kettle, None)
                 else:
-                    victim.step(kettle, poison_delta, self.sources, self.true_classes)
+                    victim.step(kettle, poison_delta)
 
             if self.args.dryrun:
                 break
-            
+
             if self.args.retrain_scenario != None:
-                if step % (self.args.retrain_iter) == 0 and step != 0 and step != (self.args.attackiter - 1):
-                    write("\nRetraining at iteration {}".format(step), self.args.output)
-                    write(f'Model reinitialized and retrain with {self.args.scenario} scenario', self.args.output)
+                if step % self.args.retrain_iter == 0 and step != 0 and step != self.args.attackiter - 1:
+                    # victim.retrain(kettle, poison_delta, max_epoch=self.args.retrain_max_epoch)
+                    print("Retrainig the base model at iteration {}".format(step))
+                    poison_delta.detach()
+                    
                     if self.args.retrain_scenario == 'from-scratch':
                         victim.initialize()
-                    elif self.args.retrain_scenario in ['transfer', 'finetuning']:
+                        print('Model reinitialized to random seed.')
+                    elif self.args.retrain_scenario == 'finetuning':
                         if self.args.load_feature_repr:
                             victim.load_feature_representation()
-                        if self.args.retrain_scenario == 'finetuning':
-                            victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
+                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
+                        print('Completely warmstart finetuning!')
 
-                    victim._iterate(kettle, poison_delta=poison_delta.detach(), max_epoch=self.args.retrain_max_epoch)
+                    victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)
                     write('Retraining done!\n', self.args.output)
+                    
+                    # self.setup_featreg(victim, kettle, poison_delta)
+                    self.compute_source_gradient(victim, kettle)
 
         return poison_delta, source_losses
 
@@ -196,7 +188,7 @@ class WitchHTBD(_Witch):
                 criterion = loss_fn
 
             closure = self._define_objective(inputs, labels, criterion, sources, source_class=kettle.poison_setup['source_class'][0], target_class=kettle.poison_setup['target_class'])
-            loss, prediction = victim.compute(closure, None, None, None)
+            loss, prediction = victim.compute(closure, None, None, None, delta_slice)
 
             if self.args.clean_grad:
                 delta_slice.data = poison_delta[poison_slices].detach().to(**self.setup)
@@ -204,14 +196,14 @@ class WitchHTBD(_Witch):
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
                 delta_slice = self._pgd_step(delta_slice, poison_images, self.tau0, kettle.dm, kettle.ds)
-
                 # Return slice to CPU:
                 poison_delta[poison_slices] = delta_slice.detach().to(device=torch.device('cpu'))
-            elif self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
+            elif self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
                 poison_delta.grad[poison_slices] = delta_slice.grad.detach().to(device=torch.device('cpu'))
-                poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
             else:
                 raise NotImplementedError('Unknown attack optimizer.')
+            
+            poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
         else:
             loss, prediction = torch.tensor(0), torch.tensor(0)
 
@@ -219,23 +211,183 @@ class WitchHTBD(_Witch):
 
     def _define_objective(self, inputs, labels, criterion, sources, source_class, target_class):
         """Implement the closure here."""
-        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm):
+        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm, perturbations):
             """This function will be evaluated on all GPUs."""  # noqa: D401
             input_indcs, source_indcs = self._index_mapping(model, inputs, sources)
-            feature_model, last_layer = bypass_last_layer(model)
-            new_inputs = torch.zeros_like(inputs)
-            new_sources = torch.zeros_like(inputs) # Sources and inputs must be of the same shape
-            for i in range(len(input_indcs)): 
-                new_inputs[i] = inputs[input_indcs[i]]
-                new_sources[i] = sources[source_indcs[i]]
+            
+            if self.args.scenario != "transfer" or self.args.htbd_full_params == False:
+                feature_model, last_layer = bypass_last_layer(model)
+                new_inputs = torch.zeros_like(inputs)
+                new_sources = torch.zeros_like(inputs) # Sources and inputs must be of the same shape
+                for i in range(len(input_indcs)): 
+                    new_inputs[i] = inputs[input_indcs[i]]
+                    new_sources[i] = sources[source_indcs[i]]
 
-            outputs = feature_model(new_inputs)
-            prediction = (last_layer(outputs).data.argmax(dim=1) == labels).sum()
-            outputs_sources = feature_model(new_sources)
-            feature_loss = (outputs - outputs_sources).pow(2).mean(dim=1).sum()
-            feature_loss.backward(retain_graph=self.retain)
-            return feature_loss.detach().cpu(), prediction.detach().cpu()
+                outputs = feature_model(new_inputs)
+                outputs_sources = feature_model(new_sources)
+                prediction = (last_layer(outputs).data.argmax(dim=1) == labels).sum()
+                feature_loss = (outputs - outputs_sources).pow(2).mean(dim=1).sum()
+                feature_loss.backward(retain_graph=self.retain)
+                return feature_loss.detach().cpu(), prediction.detach().cpu()
+            
+            else:
+
+                # Use the ResNet-specific feature extraction function
+                outputs, outputs_sources, last_layer_outputs = self._extract_resnet_features(model, 
+                                                                                            inputs, 
+                                                                                            sources, 
+                                                                                            input_indcs, 
+                                                                                            source_indcs)
+                
+                # Compute prediction for tracking accuracy
+                prediction = (last_layer_outputs.data.argmax(dim=1) == labels).sum()
+                
+                # Compute feature matching loss using the comprehensive embedding
+                feature_loss = (outputs - outputs_sources).pow(2).mean(dim=1).sum()
+                feature_loss.backward(retain_graph=self.retain)
+                return feature_loss.detach().cpu(), prediction.detach().cpu()
         return closure
+    
+    def _extract_resnet_features(self, model, inputs, sources, input_indcs, source_indcs):
+        """Extract features from key ResNet layers.
+        
+        This function specifically targets ResNet architecture components:
+        1. Initial convolutional layer
+        2. Each residual block's output
+        3. Final feature representation before classification
+        
+        Args:
+            model: The ResNet model
+            inputs: Input batch
+            sources: Source images
+            input_indcs: Mapping indices for inputs
+            source_indcs: Mapping indices for sources
+            
+        Returns:
+            outputs: Concatenated features from ResNet blocks for inputs
+            outputs_sources: Concatenated features from ResNet blocks for sources
+            last_layer_outputs: Outputs from the final classification layer
+        """
+        if isinstance(model, torch.nn.DataParallel):
+            base_model = model.module
+        else:
+            base_model = model
+
+        new_inputs = torch.zeros_like(inputs)
+        new_sources = torch.zeros_like(inputs)
+        
+        # Create the mapped inputs and sources
+        for i in range(len(input_indcs)):
+            new_inputs[i] = inputs[input_indcs[i]]
+            new_sources[i] = sources[source_indcs[i]]
+        
+        # Store activations from relevant layers
+        activations = {}
+        
+        # Define hook function to collect activations
+        def get_activation(name):
+            def hook(model, input, output):
+                # For residual blocks, output might be a tuple
+                if isinstance(output, tuple):
+                    output = output[0]
+                activations[name] = output
+            return hook
+        
+        # Register hooks for key ResNet components
+        hooks = []
+        
+        # 1. Initial convolutional layer
+        if hasattr(base_model, 'conv1'):
+            hooks.append(base_model.conv1.register_forward_hook(get_activation('conv1')))
+        
+        # 2. Layer blocks (layer1, layer2, layer3, layer4 in ResNet)
+        for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']:
+            if hasattr(base_model, layer_name):
+                # Hook the output of each layer block
+                hooks.append(getattr(base_model, layer_name).register_forward_hook(
+                    get_activation(layer_name)))
+                
+                # Also capture each block's output within the layer
+                layer = getattr(base_model, layer_name)
+                for i, block in enumerate(layer):
+                    hooks.append(block.register_forward_hook(
+                        get_activation(f'{layer_name}.{i}')))
+        
+        # 3. Final features before classification
+        if hasattr(base_model, 'avgpool'):
+            hooks.append(base_model.avgpool.register_forward_hook(get_activation('avgpool')))
+        
+        # Process input images
+        input_features_list = []
+        source_features_list = []
+        
+        # Forward pass for each input to collect activations
+        for i, x in enumerate(new_inputs):
+            # Clear previous activations
+            activations.clear()
+            
+            # Forward pass
+            with torch.no_grad():
+                base_model(x.unsqueeze(0))
+            
+            # Process and store collected activations
+            current_features = []
+            for name in sorted(activations.keys()):
+                feat = activations[name]
+                
+                # Global average pooling for convolutional outputs
+                if len(feat.shape) == 4:  # [B, C, H, W]
+                    feat = torch.nn.functional.adaptive_avg_pool2d(feat, (1, 1))
+                
+                # Flatten to 1D vector
+                feat = feat.reshape(feat.size(0), -1)
+                current_features.append(feat)
+            
+            # Concatenate all features for this input
+            if current_features:
+                all_features = torch.cat(current_features, dim=1)
+                input_features_list.append(all_features)
+        
+        # Forward pass for each source to collect activations
+        for i, x in enumerate(new_sources):
+            # Clear previous activations
+            activations.clear()
+            
+            # Forward pass
+            with torch.no_grad():
+                base_model(x.unsqueeze(0))
+            
+            # Process and store collected activations
+            current_features = []
+            for name in sorted(activations.keys()):
+                feat = activations[name]
+                
+                # Global average pooling for convolutional outputs
+                if len(feat.shape) == 4:  # [B, C, H, W]
+                    feat = torch.nn.functional.adaptive_avg_pool2d(feat, (1, 1))
+                
+                # Flatten to 1D vector
+                feat = feat.reshape(feat.size(0), -1)
+                current_features.append(feat)
+            
+            # Concatenate all features for this source
+            if current_features:
+                all_features = torch.cat(current_features, dim=1)
+                source_features_list.append(all_features)
+        
+        # Remove hooks
+        for h in hooks:
+            h.remove()
+        
+        # Stack outputs to get tensors
+        outputs = torch.cat(input_features_list, dim=0)
+        outputs_sources = torch.cat(source_features_list, dim=0)
+        
+        # Get last layer outputs for prediction accuracy
+        with torch.no_grad():
+            last_layer_outputs = base_model(new_inputs)
+        
+        return outputs, outputs_sources, last_layer_outputs
 
     def _create_patch(self, patch_shape):
         temp_patch = 0.5 * torch.ones(3, patch_shape[1], patch_shape[2])

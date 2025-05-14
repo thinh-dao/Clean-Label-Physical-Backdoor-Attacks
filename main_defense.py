@@ -129,12 +129,12 @@ if __name__ == "__main__":
     defense_time = time.time()
     print("Training Defense time: ", str(datetime.timedelta(seconds=defense_time - test_time)))
     
-    # Set up post-training defenses (firewalls)
-    firewalls = args.firewall.lower().split(',')
-    if args.firewall:
-        for firewall in firewalls:
-            firewall = get_firewall(firewall)
-            firewall(data, model, poison_delta, args)
+    # # Set up post-training defenses (firewalls)
+    # firewalls = args.firewall.lower().split(',')
+    # if args.firewall:
+    #     for firewall in firewalls:
+    #         firewall = get_firewall(firewall)
+    #         firewall(data, model, poison_delta, args)
             
     write('\n' + datetime.datetime.now().strftime("%A, %d. %B %Y %I:%M%p"), args.output)
     write('---------------------------------------------------', args.output)

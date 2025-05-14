@@ -36,7 +36,7 @@ class _VictimDistributed(_VictimSingle):
                 raise ValueError('The ensemble option is disregarded in distributed mode. One model will be launched per instance.')
         self.initialize()
         
-    def initialize(self, seed=None):
+    def initialize(self, seed=None, scenario=None):
         """Set seed and initialize model, optimizer, scheduler"""
         if seed is None:
             if self.args.model_seed is None:

@@ -102,11 +102,12 @@ class WitchLabelConsistent(_Witch):
                 delta_slice = self._pgd_step(delta_slice, poison_images, self.tau0, kettle.dm, kettle.ds)
                 # Return slice to CPU:
                 poison_delta[poison_slices] = delta_slice.detach().to(device=torch.device('cpu'))
-            elif self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
+            elif self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
                 poison_delta.grad[poison_slices] = delta_slice.grad.detach().to(device=torch.device('cpu'))
-                poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
             else:
                 raise NotImplementedError('Unknown attack optimizer.')
+            
+            poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
         else:
             loss,  prediction = torch.tensor(0), torch.tensor(0)
 
@@ -126,12 +127,14 @@ class WitchLabelConsistent(_Witch):
         self.args.scheduling = False
         self.args.opacity = 32/225
         
-        if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
+        if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
             # poison_delta.requires_grad_()
             if self.args.attackoptim in ['Adam', 'signAdam']:
                 att_optimizer = torch.optim.Adam([poison_delta], lr=self.tau0, weight_decay=0)
-            else:
+            elif self.args.attackoptim in ['momSGD', 'momPGD']:
                 att_optimizer = torch.optim.SGD([poison_delta], lr=self.tau0, momentum=0.9, weight_decay=0)
+            elif self.args.attackoptim in ['SGD']:
+                att_optimizer = torch.optim.SGD([poison_delta], lr=self.tau0, momentum=0.9, weight_decay=5e-4, nesterov=True)
                 
             if self.args.scheduling:
                 if self.args.poison_scheduler == 'linear':
@@ -165,20 +168,19 @@ class WitchLabelConsistent(_Witch):
             # Note that these steps are handled batch-wise for PGD in _batched_step
             # For the momentum optimizers, we only accumulate gradients for all poisons
             # and then use optimizer.step() for the update. This is math. equivalent
-            # and makes it easier to let pytorch track momentum.
-            if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD']:
-                if self.args.attackoptim in ['momPGD', 'signAdam']:
-                    poison_delta.grad.sign_()
-                att_optimizer.step()
-                if self.args.scheduling:
-                    scheduler.step()
-                att_optimizer.zero_grad(set_to_none=False)
-                with torch.no_grad():
-                    # Projection Step
-                    poison_delta.data = torch.max(torch.min(poison_delta, self.args.eps /
-                                                            ds / 255), -self.args.eps / ds / 255)
-                    poison_delta.data = torch.max(torch.min(poison_delta, (1 - dm) / ds -
-                                                            poison_bounds), -dm / ds - poison_bounds)
+            # and makes it easier to let pytorch track momentum.:
+            if self.args.attackoptim in ['momPGD', 'signAdam']:
+                poison_delta.grad.sign_()
+            att_optimizer.step()
+            if self.args.scheduling:
+                scheduler.step()
+            att_optimizer.zero_grad(set_to_none=False)
+            with torch.no_grad():
+                # Projection Step
+                poison_delta.data = torch.max(torch.min(poison_delta, self.args.eps /
+                                                        ds / 255), -self.args.eps / ds / 255)
+                poison_delta.data = torch.max(torch.min(poison_delta, (1 - dm) / ds -
+                                                        poison_bounds), -dm / ds - poison_bounds)
 
             
             with torch.no_grad():

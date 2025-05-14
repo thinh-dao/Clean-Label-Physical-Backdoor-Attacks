@@ -33,7 +33,6 @@ class KettleDistributed(KettleSingle):
     Attributes:
     - trainset: Training set
     - validset: Validation set
-    - defenseset: None or a subset of the validation set that is used for Strip
     - trainloader: Dataloader for the training set
     - validloader: Dataloader for the validation set
     - source_trainset: Train set including images in the source class that are used for optimizing the adversarial loss

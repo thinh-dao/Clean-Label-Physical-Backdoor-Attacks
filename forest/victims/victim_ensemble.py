@@ -2,15 +2,15 @@
 
 import torch
 import numpy as np
+import copy
+import os
+import warnings
 
 from collections import defaultdict
-import copy
-import warnings
 from math import ceil
-
 from .models import get_model
 from ..hyperparameters import training_strategy
-from .training import get_optimizers, run_step
+from .training import get_optimizers, run_step, run_validation, check_sources, check_sources_all_to_all, check_suspicion
 from ..utils import set_random_seed, write
 from ..consts import BENCHMARK, FINETUNING_LR_DROP
 from .context import GPUContext
@@ -30,13 +30,17 @@ class _VictimEnsemble(_VictimBase):
 
     def initialize(self, seed=None):
         if seed is None:
-            self.model_init_seed = np.random.randint(0, 2**32 - 1)
+            if self.args.model_seed is None:
+                self.model_init_seed = np.random.randint(0, 2**32 - 1)
+            else:
+                self.model_init_seed = self.args.model_seed
         else:
             self.model_init_seed = seed
+
         set_random_seed(self.model_init_seed)
         
-        print(f'Initializing ensemble from random key {self.model_init_seed}.')
-        write(f'Initializing ensemble from random key {self.model_init_seed}.', self.args.output)
+        print(f'Initializing ensemble {self.args.net} from random key {self.model_init_seed}.')
+        write(f'Initializing ensemble {self.args.net} from random key {self.model_init_seed}.', self.args.output)
 
         self.models, self.definitions, self.optimizers, self.schedulers, self.epochs = [], [], [], [], []
         for idx in range(self.args.ensemble):
@@ -53,8 +57,23 @@ class _VictimEnsemble(_VictimBase):
             print(repr(defs))
             write(repr(defs), self.args.output)
         self.defs = self.definitions[0]
+        
+        if self.args.scenario == 'transfer':
+            self.freeze_feature_extractor()
+            self.eval()
+            print('Features frozen.')
+        
 
     def reinitialize_last_layer(self, reduce_lr_factor=1.0, seed=None, keep_last_layer=False):
+        """
+        Reinitialize the last layer of the model and/or update training parameters.
+        
+        Args:
+            reduce_lr_factor: Factor to reduce learning rate by
+            seed: Random seed for layer initialization
+            keep_last_layer: If True, keep the existing last layer weights and only update optimizer
+        """
+                
         if self.args.model_seed is None:
             if seed is None:
                 self.model_init_seed = np.random.randint(0, 2**32 - 1)
@@ -85,36 +104,56 @@ class _VictimEnsemble(_VictimBase):
             write(f'{model_name} with id {idx}: linear layer reinitialized.', self.args.output)
             write(repr(self.definitions[idx]), self.args.output)
 
+    def freeze_feature_extractor(self):
+        """Freezes all parameters and then unfreeze the last layer."""
+        for model in self.models:
+            model.frozen = True
+            for param in model.parameters():
+                param.requires_grad = False
+
+            for param in list(model.children())[-1].parameters():
+                param.requires_grad = True
+
     def save_feature_representation(self):
         self.clean_models = []
         for model in self.models:
             self.clean_models.append(copy.deepcopy(model))
 
     def load_feature_representation(self):
-        self.models = []
-        for clean_model in self.clean_models:
-            self.models.append(copy.deepcopy(clean_model))
+        for idx, clean_model in enumerate(self.clean_models):
+            if isinstance(self.models[idx], torch.nn.DataParallel) or isinstance(self.models[idx], torch.nn.parallel.DistributedDataParallel):
+                self.models[idx].module.load_state_dict(clean_model.module.state_dict())
+            else:
+                self.models[idx].load_state_dict(clean_model.state_dict())
 
 
     """ METHODS FOR (CLEAN) TRAINING AND TESTING OF BREWED POISONS"""
-
-    def _iterate(self, kettle, poison_delta, max_epoch=None):
+    def _iterate(self, kettle, poison_delta, max_epoch=None, stats=None):
         """Validate a given poison by training the model and checking source accuracy."""
         multi_model_setup = (self.models, self.definitions, self.optimizers, self.schedulers)
 
         # Only partially train ensemble for poisoning if no poison is present
         if max_epoch is None:
             max_epoch = self.defs.epochs
-        if poison_delta is None and self.args.stagger:
-            # stagger_list = [int(epoch) for epoch in np.linspace(0, max_epoch, self.args.ensemble)]
-            # stagger_list = [int(epoch) for epoch in np.linspace(0, max_epoch, self.args.ensemble + 2)[1:-1]]
-            stagger_list = [int(epoch) for epoch in range(self.args.ensemble)]
-            write(f'Staggered pretraining to {stagger_list}.', self.args.output)
+        
+        if self.args.dryrun:
+            max_epoch = 1
+
+        if poison_delta is None and self.args.stagger is not None:
+            if self.args.stagger == 'firstn':
+                stagger_list = [int(epoch) for epoch in range(self.args.ensemble)]
+            elif self.args.stagger == 'full':
+                stagger_list = [int(epoch) for epoch in np.linspace(0, max_epoch, self.args.ensemble)]
+            elif self.args.stagger == 'inbetween':
+                stagger_list = [int(epoch) for epoch in np.linspace(0, max_epoch, self.args.ensemble + 2)[1:-1]]
+            else:
+                raise ValueError(f'Invalid stagger option {self.args.stagger}')
+            print(f'Staggered pretraining to {stagger_list}.')
         else:
             stagger_list = [max_epoch] * self.args.ensemble
 
         for idx, single_model in enumerate(zip(*multi_model_setup)):
-            write(f"\nTraining model {idx}...")
+            write(f"\nTraining model {idx}...", self.args.output)
             model, defs, optimizer, scheduler = single_model
 
             # Move to GPUs
@@ -125,7 +164,8 @@ class _VictimEnsemble(_VictimBase):
             
             defs.epochs = max_epoch
             for epoch in range(1, stagger_list[idx]+1):
-                run_step(kettle, poison_delta, epoch, *single_model)
+                write(f"Training model {idx} Epoch {epoch}...", self.args.output)
+                run_step(kettle, poison_delta, epoch, *single_model, stats=stats)
                 if self.args.dryrun:
                     break
             # Return to CPU
@@ -257,3 +297,128 @@ class _VictimEnsemble(_VictimBase):
         # collate
         avg_output = [np.mean([output[idx] for output in outputs]) for idx, _ in enumerate(outputs[0])]
         return avg_output
+
+    def gradient_with_repel(self, source_images, source_labels, repel_images, repel_labels, criterion=None, selection=None):
+        """Compute the gradient of criterion(model) w.r.t to given data with repelling."""
+        grad_list, norm_list = [], []
+        for model in self.models:
+            with GPUContext(self.setup, model) as model:
+
+                if criterion is None:
+                    criterion = self.loss_fn
+                differentiable_params = [p for p in model.parameters() if p.requires_grad]
+
+                # Select sources with maximum gradient
+                if selection == 'max_gradient':
+                    grad_norms = []
+                    for image, label in zip(source_images, source_labels):
+                        loss = criterion(model(image.unsqueeze(0)), label.unsqueeze(0))
+                        gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
+                        grad_norm = 0
+                        for grad in gradients:
+                            grad_norm += grad.detach().pow(2).sum()
+                        grad_norms.append(grad_norm.sqrt())
+                    
+                    source_poison_selected = ceil(self.args.sources_selection_rate * source_images.shape[0])
+                    indices = [i[0] for i in sorted(enumerate(grad_norms), key=lambda x:x[1])][-source_poison_selected:]
+                    source_images = source_images[indices]
+                    source_labels = source_labels[indices]
+                    write('{} sources with maximum gradients selected'.format(source_poison_selected), self.args.output)
+                
+                # Using batch processing for gradients for source images
+                if not self.args.source_gradient_batch==None:
+                    batch_size = self.args.source_gradient_batch
+                    if source_images.shape[0] < batch_size:
+                        batch_size = source_images.shape[0]
+                    else:
+                        if source_images.shape[0] % batch_size != 0:
+                            batch_size = source_images.shape[0] // ceil(source_images.shape[0] / batch_size)
+                            warnings.warn(f'Batch size changed to {batch_size} to fit source train size')
+                    source_gradients = None
+                    for i in range(source_images.shape[0]//batch_size):
+                        loss = self.args.scale * batch_size * criterion(model(source_images[i*batch_size:(i+1)*batch_size]), source_labels[i*batch_size:(i+1)*batch_size])
+                        if i == 0:
+                            source_gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
+                        else:
+                            source_gradients = tuple(map(lambda i, j: i + j, source_gradients, torch.autograd.grad(loss, differentiable_params, only_inputs=True)))
+                    source_gradients = tuple(map(lambda i: i / (source_images.shape[0] - (source_images.shape[0] % batch_size)), source_gradients))
+                else:
+                    loss = criterion(model(source_images), source_labels)
+                    source_gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
+
+                source_grad_norm = sum(grad.detach().pow(2).sum() for grad in source_gradients).sqrt()
+                print("Source gradient norm: ", source_grad_norm)
+
+                permutation = torch.randperm(repel_images.size(0))
+                repel_images = repel_images[permutation]
+                repel_labels = repel_labels[permutation]
+                flipped_labels = torch.tensor([source_labels[0]] * len(repel_images)).cuda()
+
+                # Using batch processing for gradients for repel images
+                if not self.args.source_gradient_batch==None:
+                    batch_size = self.args.source_gradient_batch
+                    if repel_images.shape[0] < batch_size:
+                        batch_size = repel_images.shape[0]
+                    else:
+                        if repel_images.shape[0] % batch_size != 0:
+                            batch_size = repel_images.shape[0] // ceil(repel_images.shape[0] / batch_size)
+                            warnings.warn(f'Batch size changed to {batch_size} to fit repel train size')
+
+                    repel_gradients = None
+                    for i in range(repel_images.shape[0]//batch_size):
+                        correct_loss = criterion(model(repel_images[i*batch_size:(i+1)*batch_size]), repel_labels[i*batch_size:(i+1)*batch_size])
+                        incorrect_loss = criterion(model(repel_images[i*batch_size:(i+1)*batch_size]), flipped_labels[i*batch_size:(i+1)*batch_size])
+                        loss = batch_size * (correct_loss - incorrect_loss)
+                        if i == 0:
+                            repel_gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
+                        else:
+                            repel_gradients = tuple(map(lambda i, j: i + j, repel_gradients, torch.autograd.grad(loss, differentiable_params, only_inputs=True)))
+                    repel_gradients = tuple(map(lambda i: i / (repel_images.shape[0] - (repel_images.shape[0] % batch_size)), repel_gradients))
+                else:
+                    correct_loss = criterion(model(repel_images), repel_labels)
+                    incorrect_loss = criterion(model(repel_images), flipped_labels)
+                    loss = correct_loss - incorrect_loss
+                    repel_gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
+
+                repel_grad_norm = sum(grad.detach().pow(2).sum() for grad in repel_gradients).sqrt()
+                print("Repel gradient norm: ", repel_grad_norm)
+
+                # Combine source and repel gradients
+                gradients = tuple(map(lambda s, r: (s + r), source_gradients, repel_gradients))
+                
+                grad_norm = 0
+                for grad in gradients:
+                    grad_norm += grad.detach().pow(2).sum()
+                grad_norm = grad_norm.sqrt()
+
+                grad_list.append(gradients)
+                norm_list.append(grad_norm)
+
+        return grad_list, norm_list
+
+    def load_trained_model(self, kettle):
+        for idx, model in enumerate(self.models):
+            load_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[idx].upper()}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
+            
+            if os.path.exists(load_path):
+                # Load state dict with correct device mapping
+                state_dict = torch.load(load_path, map_location=self.setup['device'])
+                self.models[idx].load_state_dict(state_dict)
+                # Make sure model is on the correct device
+                self.models[idx] = self.models[idx].to(**self.setup)
+                write(f'Model {self.args.net[idx]} loaded from {load_path}', self.args.output)
+                self._one_step_validation(self.models[idx], kettle)
+            else:
+                write(f'Model {self.args.net[idx]} not found, training from scratch.', self.args.output)
+
+                single_setup = (self.models[idx], self.definitions[idx], self.optimizers[idx], self.schedulers[idx])
+                self.definitions[idx].epochs = 1 if self.args.dryrun else self.args.train_max_epoch
+                for self.epoch in range(1, self.definitions[idx].epochs+1):
+                    run_step(kettle, None, self.epoch, *single_setup)
+                    if self.args.dryrun:
+                        break
+                
+                if self.args.save_clean_model:
+                    self.save_model(self.models[idx], load_path)
+
+        return True

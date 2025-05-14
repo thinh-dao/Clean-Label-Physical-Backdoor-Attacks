@@ -32,7 +32,6 @@ class KettleSingle():
     Attributes:
     - trainset: Training set
     - validset: Validation set
-    - defenseset: None or a subset of the validation set that is used for Strip
     - trainloader: Dataloader for the training set
     - validloader: Dataloader for the validation set
     - source_trainset: Train set including images in the source class that are used for optimizing the adversarial loss
@@ -62,19 +61,12 @@ class KettleSingle():
         self.trainset, self.validset = construct_datasets(path, normalize=NORMALIZE)
         self.trainset_class_to_idx = self.trainset.class_to_idx
         self.trainset_class_names = self.trainset.classes
-
+        self.num_classes = len(self.trainset_class_names)
         self.num_workers = self.get_num_workers()
         self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size,
                                                        shuffle=True, drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
         self.validloader = torch.utils.data.DataLoader(self.validset, batch_size=self.batch_size,
                                                        shuffle=False, drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
-        
-
-        self.defenseset = None
-        if args.defense == 'strip':
-            num_defense = int(args.clean_budget * len(self.validset))
-            defense_indices = random.sample(range(len(self.validset)), num_defense)
-            self.defenseset = Subset(dataset=self.validset, indices=defense_indices)
 
         self.prepare_diff_data_augmentations(normalize=NORMALIZE) # Create self.dm, self.ds, self.augment
         
@@ -98,21 +90,26 @@ class KettleSingle():
         if args.ablation < 1.0:
             self.sample = random.sample(range(len(self.trainset)), ceil(self.args.ablation * len(self.trainset)))
             self.partialset = Subset(self.trainset, self.sample)
-            self.partialloader = torch.utils.data.DataLoader(self.partialset, batch_size=min(self.batch_size, len(self.partialset)),
-                                                             shuffle=True, drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
 
     """ STATUS METHODS """
     def print_status(self):
-        target_class = self.poison_setup['poison_class']
-        target_label = self.trainset_class_names[target_class]
+        if isinstance(self.poison_setup['poison_class'], list):
+            target_label = [self.trainset_class_names[target_class] for target_class in self.poison_setup['poison_class']]
+            target_label = ",".join(target_label)
+        else:
+            target_label = self.trainset_class_names[self.poison_setup['poison_class']]
 
         # Poison set-up
         write("\n" + "-" * 15 + " Poisoning setup " + "-" * 15, self.args.output)
-        write(f"--Target/Poison class: {target_class} ({target_label})", self.args.output)
+        write(f"--Target/Poison class: {self.poison_setup['poison_class']} ({target_label})", self.args.output)
         write(f'--Threat model: {self.args.threatmodel}', self.args.output)
         if self.args.poison_selection_strategy != None: write(f'--Poison selection: {self.args.poison_selection_strategy}', self.args.output)
         
-        poison_frac_over_target = self.poison_num / len(self.trainset_dist[target_class])
+        if isinstance(self.poison_setup['poison_class'], list):
+            poison_frac_over_target = self.poison_num / sum([len(self.trainset_dist[target_class]) for target_class in self.poison_setup['poison_class']])
+        else:
+            poison_frac_over_target = self.poison_num / len(self.trainset_dist[self.poison_setup['poison_class']])
+
         poison_frac_over_total = self.poison_num / len(self.trainset)
         write('--Alpha={} - Total number of poisons: {} images - {:.2%} of target-class trainset and {:.2%} of total trainset\n'.format(self.args.alpha, self.poison_num, poison_frac_over_target, poison_frac_over_total), self.args.output)
 
@@ -159,7 +156,7 @@ class KettleSingle():
 
         # Train augmentations are handled separately as they possibly have to be backpropagated
         if self.augmentations is not None or self.args.paugment:
-            params = dict(source_size=224, target_size=224, shift=224 // 4, fliplr=True)
+            params = dict(source_size=224, target_size=224, shift=224 // 8, fliplr=True)
 
             if self.augmentations == 'default':
                 self.augment = RandomTransform(**params, mode='bilinear')
@@ -433,6 +430,8 @@ class KettleSingle():
         self.poisonset = None
         
         if self.args.recipe == 'naive':
+            if self.args.threatmodel == 'all-to-all':
+                raise NotImplementedError('All-to-all threat model is not implemented for Naive attack yet!')
             target_class = self.poison_setup['target_class']
             self.poison_num = ceil(self.args.alpha / (1-self.args.alpha) * len(self.trainset_dist[target_class]))  
             if self.poison_num > len(self.triggerset_dist[target_class]):
@@ -461,30 +460,65 @@ class KettleSingle():
                     criterion = torch.nn.CrossEntropyLoss()
                 
                 # Collect images and labels
-                images, labels, poison_target_ids = [], [], []
-                for idx in self.trainset_dist[poison_class]:
-                    images.append(self.trainset[idx][0])
-                    labels.append(self.trainset[idx][1])
-                    poison_target_ids.append(idx)
+                if self.args.poison_selection_strategy != 'random':
+                    images, labels, poison_target_ids = [], [], []
+                    if self.args.threatmodel == 'all-to-all':
+                        if isinstance(poison_class, list):
+                            for c in poison_class:
+                                for idx in self.trainset_dist[c]:
+                                    images.append(self.trainset[idx][0])
+                                    labels.append(self.trainset[idx][1])
+                                    poison_target_ids.append(idx)
+                        else:
+                            raise ValueError('All-to-all threat model: Target class is not a list!')
+                    else:
+                        for idx in self.trainset_dist[poison_class]:
+                            images.append(self.trainset[idx][0])
+                            labels.append(self.trainset[idx][1])
+                            poison_target_ids.append(idx)
                     
-                images = torch.stack(images, dim=0).to(**self.setup)
-                labels = torch.tensor(labels).to(device=self.setup['device'], dtype=torch.long)
+                    images = torch.stack(images, dim=0).to(**self.setup)
+                    labels = torch.tensor(labels).to(device=self.setup['device'], dtype=torch.long)
+                else:
+                    poison_target_ids = []
+                    if isinstance(poison_class, list):
+                        for c in poison_class:
+                            for idx in self.trainset_dist[c]:
+                                poison_target_ids.append(idx)
+                    else:
+                        for idx in self.trainset_dist[poison_class]:
+                            poison_target_ids.append(idx)
+
                 poison_target_ids = torch.tensor(poison_target_ids, dtype=torch.long)
                     
                 if self.args.poison_selection_strategy == 'random':
-                    self.poison_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
-                    indices = random.sample(list(range(len(poison_target_ids))), self.poison_num)
+                    indices = []
+                    if isinstance(poison_class, list):
+                        for c in poison_class:
+                            sample_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[c])))
+                            indices.extend(random.sample(self.trainset_dist[c], sample_num))
+                    else:
+                        sample_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
+                        indices.extend(random.sample(self.trainset_dist[poison_class], sample_num))
+                    self.poison_num = len(indices)
                     
                 elif self.args.poison_selection_strategy == 'cross_margin':
                     victim.eval(dropout=True)
+                    distances = []
                     with torch.no_grad():
                         model = victim.model
 
-                        trigger_source_poi = np.array(trigger_source_poi).squeeze()
+                        # trigger_source_poi = np.array(trigger_source_poi).squeeze()
+                        # for image, label in zip(images, labels):
+                        #     img = image.to(**self.setup)
+                        #     feature = featract(img.unsqueeze(0)).detach().cpu().numpy().squeeze()
+                        #     distances.append(self.cosine_cluster_distances(feature, trigger_source_poi))
+                        
+                        source_class = self.poison_setup['source_class']
                         for image, label in zip(images, labels):
-                            img = image.to(**self.setup)
-                            feature = featract(img.unsqueeze(0)).detach().cpu().numpy().squeeze()
-                            distances.append(self.cosine_cluster_distances(feature, trigger_source_poi))
+                            output = model(image.unsqueeze(0))
+                            log_softmax_output = torch.nn.functional.log_softmax(output, dim=1)
+                            distances.append(log_softmax_output[0][label] - log_softmax_output[0][source_class])
 
                     self.poison_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
                     indices = [i[0] for i in sorted(enumerate(distances), key=lambda x:x[1])][:self.poison_num]
@@ -605,12 +639,16 @@ class KettleSingle():
                         write(f'Taking average gradient norm of ensemble of {len(victim.models)} models', self.args.output)
                         grad_norms = [sum(col) / float(len(col)) for col in zip(*grad_norms_list)]
                     
-                    self.poison_num = ceil(np.ceil(self.args.alpha * len(self.trainset_dist[poison_class])))
+                    if isinstance(poison_class, list):
+                        total_num = sum([len(self.trainset_dist[c]) for c in poison_class])
+                        self.poison_num = ceil(self.args.alpha * total_num)
+                    else:
+                        self.poison_num = ceil(self.args.alpha * len(self.trainset_dist[poison_class]))
                     indices = [i[0] for i in sorted(enumerate(grad_norms), key=lambda x:x[1])][-self.poison_num:]
 
                 elif self.args.poison_selection_strategy == 'max_gradient_product':
                     losses = []
-                    victim.eval(dropout=True)
+                    victim.eval(victim.model, dropout=True)
             
                     _sources = torch.stack([data[0] for data in self.source_trainset], dim=0).to(**self.setup)
                     _target_classes = torch.tensor([self.poison_setup['poison_class']] * self.source_train_num).to(device=self.setup['device'], dtype=torch.long)
@@ -635,11 +673,18 @@ class KettleSingle():
                 else:
                     raise NotImplementedError('Poison selection {} strategy is not implemented yet!'.format(self.args.poison_selection_strategy))
 
-                # Select poisons with maximum gradient norm
-                poison_target_ids = poison_target_ids[indices]
+                if self.args.poison_selection_strategy == 'random':
+                    poison_target_ids = indices
+                else:
+                    poison_target_ids = poison_target_ids[indices]
+                
                 write('Selecting {} clean samples from class {} with {} for poisoning'.format(len(poison_target_ids), poison_class, self.args.poison_selection_strategy), self.args.output)
                 
-                self.poison_target_ids.extend(poison_target_ids.tolist())
+                if not isinstance(poison_target_ids, list):
+                    self.poison_target_ids = poison_target_ids.tolist()
+                else:
+                    self.poison_target_ids = poison_target_ids
+
                 self.poison_target_ids.sort()
                 self.poisonset = Subset(self.trainset, indices=copy.deepcopy(self.poison_target_ids)) # Deep copy to prevent overwrite
                 
@@ -693,13 +738,12 @@ class KettleSingle():
             with open(f'{self.args.dataset}_{self.args.trigger}_dict.pkl', 'wb') as f:
                 pickle.dump(self.triggerset_dist, f)
         
-        # Parse threat model
-        self.extract_poisonkey()
-        if self.args.dataset != 'Animal_classification':
-            print("Get class distribution of suspicionset")
-            self.setup_suspicionset() # Set up suspicionset and false positive set
         self.poison_setup = self.parse_threats() # Return a dictionary of poison_budget, source_num, poison_class, source_class, target_class
         self.setup_poisons() # Set up source trainset and source testset
+
+        if self.args.dataset != 'Animal_classification' and self.args.threatmodel != 'all-to-all':
+            print("Get class distribution of suspicionset")
+            self.setup_suspicionset() # Set up suspicionset and false positive set
         
     def class_distribution(self, dataset):
         """Return a dictionary of class distribution in the dataset."""
@@ -740,12 +784,23 @@ class KettleSingle():
         clean-all-source draws poisons from a target class and optimize poison through sample from multiple source classes
         third-party draws all poisons from a class that is unrelated to both source and target label.
         self-betrayal draws all poisons from the source_class
-        """        
+        """  
+        # Parse threat model
+        if self.args.threatmodel != 'all-to-all':
+            self.extract_poisonkey()
+
         if self.args.recipe in ['naive', 'label-consistent']:
             # Take all source class except target class
             list_intentions = self.triggerset_class_ids
             list_intentions.remove(self.target_class)
             self.source_class = list_intentions
+        
+        if self.args.threatmodel == 'all-to-all' and ',' in self.args.poisonkey:
+            pairs = self.args.poisonkey.split(',')
+            self.source_class = [int(pair.split('-')[0]) for pair in pairs]
+            self.target_class = [int(pair.split('-')[1]) for pair in pairs]
+            self.mapping = {int(pair.split('-')[0]): int(pair.split('-')[1]) for pair in pairs}
+            print(self.mapping)
             
         if self.args.threatmodel == 'dirty-single-source':
             raise NotImplementedError('Dirty single source threat model is not implemented yet!')
@@ -757,6 +812,8 @@ class KettleSingle():
         elif self.args.threatmodel == 'clean-multi-source':
             if len(self.source_class) < 2: raise ValueError('Clean multi source threat model requires at least two source classes!')
             return dict(poison_class=self.target_class, target_class=self.target_class, source_class=self.source_class)
+        elif self.args.threatmodel == 'all-to-all':
+            return dict(poison_class=self.target_class, target_class=self.target_class, source_class=self.source_class, mapping=self.mapping)
         elif self.args.threatmodel == 'clean-all-source':
             raise NotImplementedError('Clean all source threat model is not implemented yet!')
         elif self.args.threatmodel == 'third-party':
@@ -812,15 +869,29 @@ class KettleSingle():
             self.source_trainset = PatchDataset(dataset=Subset(self.trainset, indices=source_poison_train_ids), trigger=self.args.trigger)
         
         else:
-            # Extract trigger ids from source class and create source_trainset
-            source_train_ids = []
-            for source_class in self.poison_setup['source_class']:
-                source_train_ids.extend(self.triggerset_dist[source_class])
-            
-            # Create source_trainset
-            self.source_train_num = ceil(self.args.sources_train_rate * len(source_train_ids))
-            source_poison_train_ids = random.sample(source_train_ids, self.source_train_num)    
-            self.source_trainset = Subset(self.triggerset, indices=source_poison_train_ids, transform=train_transform)
+            if self.args.threatmodel == 'all-to-all':
+                # Extract trigger ids from source class and create source_trainset
+                source_poison_train_ids = []
+        
+                for source_class in self.poison_setup['source_class']:
+                    sample_num = int(self.args.sources_train_rate * len(self.triggerset_dist[source_class]))
+                    sample_ids = random.sample(self.triggerset_dist[source_class], sample_num)
+                    source_poison_train_ids.extend(sample_ids)
+                
+                # Create source_trainset
+                self.source_train_num = len(source_poison_train_ids)
+                self.source_trainset = Subset(self.triggerset, indices=source_poison_train_ids, transform=train_transform)
+
+            else:
+                # Extract trigger ids from source class and create source_trainset
+                source_train_ids = []
+                for source_class in self.poison_setup['source_class']:
+                    source_train_ids.extend(self.triggerset_dist[source_class])
+                
+                # Create source_trainset
+                self.source_train_num = ceil(self.args.sources_train_rate * len(source_train_ids))
+                source_poison_train_ids = random.sample(source_train_ids, self.source_train_num)    
+                self.source_trainset = Subset(self.triggerset, indices=source_poison_train_ids, transform=train_transform)
 
         if self.args.digital_test:
             # Extract normal test ids and patch
