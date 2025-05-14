@@ -20,3 +20,5 @@ poisons
 outputs
 models
 move.py
+test_meta
+*.pdf
