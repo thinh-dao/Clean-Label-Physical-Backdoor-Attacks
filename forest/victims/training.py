@@ -41,7 +41,7 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler,
         list(model.children())[-1].train() if frozen else model.train()
     
     # Select appropriate data loader
-    if poison_delta is not None and kettle.args.gaussian_denoise == False:
+    if poison_delta is not None and kettle.args.denoise == False:
         if kettle.args.ablation < 1.0:
             assert defs.defense is None, "Ablation cannot run with defenses!"
             dataset = kettle.partialset
@@ -97,11 +97,12 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler,
             inputs = inputs.to(**kettle.setup)
             labels = labels.to(dtype=torch.long, device=kettle.setup['device'], non_blocking=NON_BLOCKING)
             
+            # Add data augmentation if configured
+            if defs.augmentations:
+                inputs = kettle.augment(inputs)
+                    
             # Temporary workaround
-            if kettle.args.gaussian_denoise == False:
-                # Add data augmentation if configured
-                if defs.augmentations:
-                    inputs = kettle.augment(inputs)
+            if kettle.args.denoise == False:
                 
                 # Apply input-based defenses if activated
                 mixing_lmb = None

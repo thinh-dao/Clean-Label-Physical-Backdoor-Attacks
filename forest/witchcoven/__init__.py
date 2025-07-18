@@ -1,10 +1,11 @@
 """Interface for poison recipes."""
-from .witch_matching import WitchGradientMatching, WitchGradientMatchingNoisy, WitchGradientMatchingHidden, WitchMatchingMultiSource
-from .witch_htbd import WitchHTBD
-from .witch_clbd import WitchLabelConsistent
+from .witch_gradient_matching import WitchGradientMatching, WitchGradientMatchingNoisy, WitchGradientMatchingHidden, WitchMatchingMultiSource
+from .witch_hidden_trigger import WitchHTBD
+from .witch_label_consistent import WitchLabelConsistent
 from .witch_meta import WitchMetaPoison, WitchMetaPoison_v3, WitchMetaPoisonHigher, WitchMetaPoisonFirstOrder
 from .witch_base import _Witch
-from .witch_mttp import WitchMTTP, WitchMTTP_Tesla
+from .witch_parameter_matching import WitchMTTP, WitchMTTP_Tesla
+from .witch_feature_matching import Witch_FM
 
 import torch
 
@@ -28,13 +29,15 @@ def Witch(args, setup=dict(device=torch.device('cpu'), dtype=torch.float)):
         return WitchMatchingMultiSource(args, setup)
     elif args.recipe == 'hidden-trigger':
         return WitchHTBD(args, setup)
+    elif args.recipe == 'feature-matching':
+        return Witch_FM(args, setup)
     elif args.recipe == 'label-consistent':
         return WitchLabelConsistent(args, setup)
     elif args.recipe == 'mttp':
         return WitchMTTP(args, setup)
     elif args.recipe == 'mttp-tesla':
         return WitchMTTP_Tesla(args, setup)
-    elif args.recipe == 'naive':
+    elif args.recipe == 'naive' or args.recipe == 'dirty-label':
         return None
     else:
         raise NotImplementedError()

@@ -29,7 +29,7 @@ if args.exp_name is None:
     args.exp_name = f'exp_{exp_num}'
 
 # Set up output file
-args.output = f'outputs/{args.exp_name}/{args.recipe}/{args.trigger}/{args.net[0].upper()}/{args.poisonkey}_{args.trigger}_{args.alpha}_{args.eps}_{args.attackoptim}_{args.attackiter}.txt'
+args.output = f'outputs/{args.exp_name}/{args.dataset}/{args.net[0].upper()}_{args.scenario}_{args.recipe}_{args.poisonkey}_{args.trigger}_{args.alpha}_{args.eps}_{args.visreg}_{args.vis_weight}_{args.attackoptim}_{args.attackiter}.txt'
 print("Output is logged in", args.output)
 os.makedirs(os.path.dirname(args.output), exist_ok=True)
 open(args.output, 'w').close() # Clear the output files
@@ -55,14 +55,16 @@ if __name__ == "__main__":
         
     train_time = time.time()
     print("Train time: ", str(datetime.timedelta(seconds=train_time - start_time)))
-                
+    
+    if args.clean_training_only:
+        exit(0)
+    
     # Select poisons based on maximum gradient norm
     data.select_poisons(model)
-    
     # Print data status
     data.print_status()
         
-    if args.recipe != 'naive':
+    if args.recipe != 'naive' and args.recipe != 'dirty-label':
         poison_delta = witch.brew(model, data)
     else:
         poison_delta = None
@@ -73,7 +75,7 @@ if __name__ == "__main__":
     if args.retrain_from_init:
         model.retrain(data, poison_delta) # Evaluate poison performance on the retrained model
     
-    if args.recipe != "naive":
+    if args.recipe != "naive" and args.recipe != "dirty-label":
         clean_images = []   
         poisoned_images = []
 
@@ -88,7 +90,7 @@ if __name__ == "__main__":
         write(f'Average PSNR: {calculate_average_psnr(clean_images, poisoned_images)}', args.output)
 
     # Export
-    if args.save_poison is not None and args.recipe != 'naive':
+    if args.save_poison is not None and args.recipe != 'naive' and args.recipe != 'dirty-label':
         data.export_poison(poison_delta, model, path=args.poison_path, mode=args.save_poison)
         
     write('Validating poisoned model...', args.output)

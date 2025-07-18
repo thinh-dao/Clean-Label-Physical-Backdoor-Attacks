@@ -101,12 +101,29 @@ def bypass_last_layer(model):
     headless_model = torch.nn.Sequential(*(layer_cake[:-1]), torch.nn.Flatten()).eval()  # this works most of the time all of the time :<
     return headless_model, last_layer
 
-def cw_loss(outputs, target_classes, clamp=-100):
-    """Carlini-Wagner loss for brewing"""
-    top_logits, _ = torch.max(outputs, 1)
-    target_logits = torch.stack([outputs[i, target_classes[i]] for i in range(outputs.shape[0])])
-    difference = torch.clamp(top_logits - target_logits, min=clamp)
-    return torch.mean(difference)
+def cw_loss(outputs, target_classes, clamp_min=-100, confidence=0, reduction="mean"):
+    """Carlini-Wagner targeted loss"""
+    batch_size = outputs.shape[0]
+    
+    # Get target logits
+    target_logits = outputs[torch.arange(batch_size), target_classes]
+    
+    # Mask out target classes and find max non-target logits
+    mask = torch.ones_like(outputs, dtype=torch.bool)
+    mask[torch.arange(batch_size), target_classes] = False
+    max_non_target = torch.max(outputs.masked_fill(~mask, float('-inf')), dim=1)[0]
+    
+    # CW loss: max_non_target - target + confidence
+    loss = torch.clamp(max_non_target - target_logits + confidence, min=clamp_min)
+    
+    if reduction == "mean":
+        return torch.mean(loss)
+    elif reduction == "sum":
+        return torch.sum(loss)
+    elif reduction == "none":
+        return loss
+    else:
+        raise ValueError(f"Invalid reduction method: {reduction}. Use 'mean', 'sum', or 'none'.")
 
 def _label_to_onehot(source, num_classes=100):
     source = torch.unsqueeze(source, 1)

@@ -42,6 +42,11 @@ class WitchLabelConsistent(_Witch):
             if self.args.clean_grad:
                 delta_slice = torch.zeros_like(delta_slice)
             delta_slice.requires_grad_()  # TRACKING GRADIENTS FROM HERE
+            
+            if self.args.attackoptim == "cw":
+                delta_slice = 0.5 * (torch.tanh(delta_slice) + 1)
+                delta_slice.retain_grad()  # Ensure the transformed tensor still requires gradients
+                
             poison_images = inputs[batch_positions]
             inputs[batch_positions] += delta_slice
 
@@ -122,13 +127,13 @@ class WitchLabelConsistent(_Witch):
             dataloader = kettle.poisonloader
             
         self.args.attackiter = 100
-        self.args.tau0 = self.args.eps / 4 / 225
+        self.args.tau0 = self.args.eps / 4 / 255
         self.args.attackoptim = 'PGD'
         self.args.scheduling = False
-        self.args.opacity = 32/225
+        self.args.opacity = 255/255
         
         if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
-            # poison_delta.requires_grad_()
+            poison_delta.requires_grad_()
             if self.args.attackoptim in ['Adam', 'signAdam']:
                 att_optimizer = torch.optim.Adam([poison_delta], lr=self.tau0, weight_decay=0)
             elif self.args.attackoptim in ['momSGD', 'momPGD']:

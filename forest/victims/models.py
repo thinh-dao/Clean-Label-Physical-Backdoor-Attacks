@@ -7,7 +7,6 @@ import os
 import timm
 
 from einops import rearrange, repeat
-from torch.nn import Parameter
 from torch.nn import functional as F
 from torchvision.models import resnet50, resnet18, vgg11, mobilenet_v2, mobilenet_v3_small, ResNet50_Weights, ResNet18_Weights, VGG11_Weights, MobileNet_V2_Weights, MobileNet_V3_Small_Weights
 from torchvision.models.resnet import BasicBlock, Bottleneck

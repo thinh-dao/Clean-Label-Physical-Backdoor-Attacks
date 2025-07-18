@@ -134,7 +134,7 @@ class _VictimSingle(_VictimBase):
         single_setup = (self.model, self.defs, self.optimizer, self.scheduler)
         self.defs.epochs = 1 if self.args.dryrun else max_epoch
 
-        if kettle.args.gaussian_denoise:
+        if kettle.args.denoise:
             denoiser = OpenCVNonLocalMeansDenoiser(h=10, h_color=10)
 
             tensors = []
@@ -146,9 +146,6 @@ class _VictimSingle(_VictimBase):
 
                 if lookup is not None:
                     tensor += poison_delta[lookup, :, :, :]
-
-                # if self.defs.augmentations:
-                #     tensor = kettle.augment(tensor)
 
                 tensor = denoiser(tensor)
                 if NORMALIZE:
@@ -342,8 +339,7 @@ class _VictimSingle(_VictimBase):
         return gradients, grad_norm
 
     def load_trained_model(self, kettle):
-        load_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
-        
+        load_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_{self.args.scenario}_{self.args.dataset.upper()}_{self.args.optimization}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
         if os.path.exists(load_path):
             write(f'Model {self.args.net[0]} already exists, skipping training.', self.args.output)
             if isinstance(self.model, torch.nn.DataParallel):

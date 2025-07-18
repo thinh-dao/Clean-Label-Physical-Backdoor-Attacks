@@ -17,8 +17,8 @@ def options():
     parser.add_argument('--net', default='ResNet50', type=lambda s: [str(item) for item in s.split(',')])
     parser.add_argument('--dataset', default='Facial_recognition', type=str)
     parser.add_argument('--recipe', default='gradient-matching', type=str, choices=['gradient-matching', 'gradient-matching-private', 'mttp', 'mttp-tesla',
-                                                                                    'hidden-trigger', 'hidden-trigger-mt' 'gradient-matching-mt',
-                                                                                    'patch', 'gradient-matching-hidden', 'meta', 'meta-v2', 'meta-v3', 'meta-first-order', 'naive', 'label-consistent'])
+                                                                                    'hidden-trigger', 'hidden-trigger-mt', 'gradient-matching-mt', 'feature-matching',
+                                                                                    'patch', 'gradient-matching-hidden', 'meta', 'meta-v2', 'meta-v3', 'meta-first-order', 'naive', 'dirty-label', 'label-consistent'])
                                                                                     
     parser.add_argument('--threatmodel', default='clean-single-source', type=str, choices=['clean-single-source', 'clean-multi-source', 'clean-all-source', 'third-party', 'self-betrayal', 'all-to-all'])
     parser.add_argument('--num_source_classes', default=1, type=int, help='Number of source classes (for many-to-one attacks)')
@@ -72,17 +72,26 @@ def options():
     
     # MTTP params
     parser.add_argument('--finetuning_lr', default=0.0001, type=float)
-    parser.add_argument('--backdoor_training_epoch', default=10, type=int)
-    parser.add_argument('--expert_epochs', default=1, type=int)
+    parser.add_argument('--backdoor_training_epoch', default=6, type=int)
+    parser.add_argument('--expert_epochs', default=6, type=int)
     parser.add_argument('--sequential_generation', default=False, action='store_true')
     parser.add_argument('--step_every', default=5, type=int)
-    parser.add_argument('--syn_steps', default=2, type=int)
+    parser.add_argument('--syn_steps', default=1, type=int)
     parser.add_argument('--syn_lr', default=0.001, type=float)
+    parser.add_argument('--num_experts', default=3, type=int)
+    parser.add_argument('--backdoor_training_mode', default='full-data', type=str, choices=['all-data', 'poison-only'], help='Mode of backdoor training.')
+    parser.add_argument('--average_trajectory', default=False, action='store_true', help='Average the trajectories of the experts during MTTP poisoning.')
+    
+    # Distribution Matching params
+    parser.add_argument('--sample_from_trajectory', default=False, action='store_true', help='Whether to sample embedding space from training trajectory')
+    parser.add_argument('--num_trajectories', default=1, help="Number of training trajectories that can be sampled")
+    parser.add_argument('--max_sample_epoch', default=20, help="Max epoch that will be sampled")
+    parser.add_argument('--sample_every', default=1, type=int, help="Sample every <sample_every> epochs to reduce memory usage")
+    
+    # Poisoning
+    parser.add_argument('--paugment', action='store_true', help='Augment poison batch during optimization')
     parser.add_argument('--pbatch', default=64, type=int, help='Poison batch size during optimization')
-    parser.add_argument('--paugment', action='store_false', help='Do not augment poison batch during optimization')
     parser.add_argument('--data_aug', type=str, default='default', help='Mode of diff. data augmentation.')
-    parser.add_argument('--num_experts', default=1, type=int)
-    parser.add_argument('--backdoor_training_mode', default='all-data', type=str, choices=['all-data', 'poison-only'], help='Mode of backdoor training.')
 
     # Poisoning algorithm changes
     parser.add_argument('--full_data', action='store_true', help='Use full train data for poisoning (instead of just the poison images)')
@@ -90,6 +99,7 @@ def options():
     parser.add_argument('--stagger', default=None, type=str, help='Stagger the network ensemble if it exists', choices=['firstn', 'full', 'inbetween'])
     parser.add_argument('--step', action='store_true', help='Optimize the model for one epoch.')
     parser.add_argument('--train_max_epoch', default=40, type=int, help='Train only up to this epoch before poisoning.')
+    parser.add_argument('--clean_training_only', default=False, action='store_true', help='Only train the clean data')
 
     # Use only a subset of the dataset:
     parser.add_argument('--ablation', default=1.0, type=float, help='What percent of data (including poisons) to use for validation')
@@ -116,7 +126,7 @@ def options():
     parser.add_argument('--clean_grad', action='store_true', help='Compute the first-order poison gradient.')
 
     # Validation behavior
-    parser.add_argument('--vruns', default=1, type=int, help='How often to re-initialize and check source after retraining')
+    parser.add_argument('--vruns', default=3, type=int, help='How often to re-initialize and check source after retraining')
     parser.add_argument('--vnet', default=None, type=lambda s: [str(item) for item in s.split(',')], help='Evaluate poison on this victim model. Defaults to --net')
     parser.add_argument('--retrain_from_init', action='store_true', help='Additionally evaluate by retraining on the same model initialization.')
     parser.add_argument('--skip_clean_training', action='store_true', help='Skip clean training. This is only suggested for attacks that do not depend on a clean model.')
@@ -127,7 +137,7 @@ def options():
     # Strategy overrides:
     parser.add_argument('--batch_size', default=64, type=int, help='Override default batch_size of --optimization strategy')
     parser.add_argument('--lr', default=0.1, type=float, help='Override default learning rate of --optimization strategy')
-    parser.add_argument('--noaugment', action='store_true', help='Do not use data augmentation during training.')
+    parser.add_argument('--augment', action='store_true', default=False, help='Use data augmentation during training.')
 
     # Optionally, datasets can be stored within RAM:
     parser.add_argument('--cache_dataset', action='store_true', help='Cache the entire thing :>')
@@ -145,10 +155,10 @@ def options():
 
     # Backdoor attack:
     parser.add_argument('--keep_sources', action='store_true', default=True, help='Do we keep the sources are used for testing attack success rate?')
-    parser.add_argument('--sources_train_rate', default=0.75, type=float, help='Fraction of source_class trainset that can be selected crafting poisons')
+    parser.add_argument('--sources_train_rate', default=1.0, type=float, help='Fraction of source_class trainset that can be selected crafting poisons')
     parser.add_argument('--sources_selection_rate', default=1.0, type=float, help='Fraction of sources to be selected for calculating source_grad in gradient-matching')
     parser.add_argument('--source_gradient_batch', default=64, type=int, help='Batch size for sources train gradient computing')
-    parser.add_argument('--val_max_epoch', default=20, type=int, help='Train only up to this epoch for final validation.')
+    parser.add_argument('--val_max_epoch', default=40, type=int, help='Train only up to this epoch for final validation.')
     parser.add_argument('--retrain_max_epoch', default=20, type=int, help='Train only up to this epoch for retraining during crafting.')
     parser.add_argument('--retrain_scenario', default=None, type=str, choices=['from-scratch', 'finetuning', 'transfer'], help='Scenario for retraining and evaluating on the poisoned dataset')
     parser.add_argument('--load_feature_repr', default=True, action='store_true', help='Load feature representation of the model trained on clean data')
@@ -159,7 +169,7 @@ def options():
     parser.add_argument('--digital_trigger_path', default='digital_triggers')
     parser.add_argument('--opacity', default=32/255, type=float, help='The opacity of digital trigger')
     parser.add_argument('--retrain_iter', default=100, type=int, help='Start retraining every <retrain_iter> iterations')
-    parser.add_argument('--source_selection_strategy', default=None, type=str, choices=['max_gradient', 'max_loss'], help='source selection strategy')
+    parser.add_argument('--source_selection_strategy', default="max_gradient", type=str, choices=['max_gradient', 'max_loss'], help='source selection strategy')
     parser.add_argument('--poison_selection_strategy', default="random", type=str, help='Poison selection strategy')
     
     # Poison properties / controlling the strength of the attack:
@@ -183,7 +193,7 @@ def options():
     parser.add_argument("--random_placement", action='store_true')
 
     # Denoising and noising
-    parser.add_argument("--gaussian_denoise", action='store_true')
+    parser.add_argument("--denoise", action='store_true')
     parser.add_argument("--gaussian_noise", action='store_true')
 
     return parser

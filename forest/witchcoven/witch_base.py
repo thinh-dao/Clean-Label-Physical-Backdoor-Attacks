@@ -4,7 +4,7 @@ import torch
 import random
 
 import torch.distributed
-from ..utils import cw_loss, write, gauss_smooth, min_max_normalize
+from ..utils import cw_loss, write, gauss_smooth, min_max_normalize, total_variation_loss, upwind_tv
 from ..consts import NON_BLOCKING, BENCHMARK, NORMALIZE, FINETUNING_LR_DROP
 torch.backends.cudnn.benchmark = BENCHMARK
 from ..victims.victim_single import _VictimSingle
@@ -124,6 +124,84 @@ class _Witch():
                 feats = self.featract(inputs)
                 return (feats - self.target_feature).pow(2).mean()
             
+    def get_regularized_loss(self, perturbations, inputs, tau):
+        # ==========================================================
+        # 1)  Simple Lp-norm penalties (no spatial smoothness term)
+        # ==========================================================
+        if self.args.visreg == 'l1':
+            regularized_loss = torch.mean(torch.abs(perturbations))
+
+        elif self.args.visreg == 'l2':
+            regularized_loss = torch.mean(torch.linalg.matrix_norm(perturbations).pow(2))
+
+        # ==========================================================
+        # 2)  Pure Total-Variation penalties (isotropic & up-wind)
+        # ==========================================================
+        elif self.args.visreg == 'UTV':
+            regularized_loss = upwind_tv(perturbations)
+
+        # ==========================================================
+        # 3)  Mixed TV + hard Lp penalties
+        # ==========================================================
+        elif self.args.visreg == 'TV+l1':
+            regularized_loss = torch.mean(torch.abs(perturbations)) + total_variation_loss(perturbations)
+
+        elif self.args.visreg == 'TV+l2':
+            regularized_loss = torch.mean(torch.linalg.matrix_norm(perturbations).pow(2)) + total_variation_loss(perturbations)
+
+        # ==========================================================
+        # 4)  “Soft” norm constraints (hinge on L2 or L∞ budget τ)
+        # ==========================================================
+        elif self.args.visreg == 'soft_l2':
+            B = perturbations.shape[0]
+            norm = perturbations.view(B, -1).norm(p=2, dim=1)            # ‖δ‖₂ per sample
+            regularized_loss = ((norm - tau).clamp(min=0).pow(2)).mean()
+
+        elif self.args.visreg == 'soft_linf':                                               # ε-margin to avoid dead-zone
+            regularized_loss = (perturbations.abs() - tau).clamp(min=0).mean()
+
+        # ==========================================================
+        # 5)  Soft-L∞ budget + TV / UTV smoothing
+        # ==========================================================
+        elif self.args.visreg == 'TV+soft_linf':
+            hinge = (perturbations.abs() - tau).clamp(min=0).mean()
+            tv    = total_variation_loss(perturbations)
+            regularized_loss = hinge + tv                                # optionally scale tv with λ_tv
+
+        elif self.args.visreg == 'UTV+soft_linf':
+            eps   = 1e-3
+            hinge = (perturbations.abs() - tau).clamp(min=0).mean()
+            utv   = upwind_tv(perturbations)
+            regularized_loss = hinge + utv
+
+        # ==========================================================
+        # 6)  Soft-L2 budget + TV / UTV smoothing
+        # ==========================================================
+        elif self.args.visreg == 'TV+soft_l2':
+            B     = perturbations.size(0)
+            norm  = perturbations.view(B, -1).norm(p=2, dim=1)
+            hinge = ((norm - tau).clamp(min=0).pow(2)).mean()
+            tv    = total_variation_loss(perturbations)
+            regularized_loss = hinge + tv
+
+        elif self.args.visreg == 'UTV+soft_l2':
+            B     = perturbations.size(0)
+            norm  = perturbations.view(B, -1).norm(p=2, dim=1)
+            hinge = ((norm - tau).clamp(min=0).pow(2)).mean()
+            utv   = upwind_tv(perturbations)
+            regularized_loss = hinge + utv
+
+        # ==========================================================
+        # 7)  Catch-all for typos or unsupported flags
+        # ==========================================================
+        else:
+            if self.args.visreg is not None:
+                raise ValueError(f"{self.args.visreg} regularization not defined")
+            regularized_loss = torch.tensor(0)
+
+        return regularized_loss
+
+            
     def compute_source_gradient(self, victim, kettle):
         """Implement common initialization operations for brewing."""
         self.sources_train = torch.stack([data[0] for data in kettle.source_trainset], dim=0).to(**self.setup)
@@ -180,7 +258,7 @@ class _Witch():
                     raise ValueError('Invalid source criterion chosen ...')
             else:
                 if self.args.source_criterion in ['cw', 'carlini-wagner']:
-                    self.source_grad, self.source_gnorm = victim.gradient(_sources, _target_classes, cw_loss, selection=self.args.source_selection_strategy)
+                    self.source_grad, self.source_gnorm = victim.gradient(_sources, _target_classes, criterion=cw_loss, selection=self.args.source_selection_strategy)
                 elif self.args.source_criterion in ['unsourceed-cross-entropy', 'unxent']:
                     self.source_grad, self.source_gnorm = victim.gradient(_sources, _true_classes, selection=self.args.source_selection_strategy)
                     for grad in self.source_grad:
@@ -262,10 +340,10 @@ class _Witch():
             dataloader = kettle.trainloader
         else:
             dataloader = kettle.poisonloader
-
-        if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
+        
+        if self.args.attackoptim in ['cw', 'Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
             poison_delta.requires_grad_()
-            if self.args.attackoptim in ['Adam', 'signAdam']:
+            if self.args.attackoptim in ['cw', 'Adam', 'signAdam']:
                 att_optimizer = torch.optim.Adam([poison_delta], lr=self.tau0, weight_decay=0)
             elif self.args.attackoptim in ['momSGD', 'momPGD']:
                 att_optimizer = torch.optim.SGD([poison_delta], lr=self.tau0, momentum=0.9, weight_decay=0)
@@ -309,25 +387,19 @@ class _Witch():
                 scheduler.step()
             att_optimizer.zero_grad(set_to_none=False)
             
-            if self.args.visreg is not None and "soft" in self.args.visreg:
+            if self.args.attackoptim != "cw":
                 with torch.no_grad():
-                    # Projection Step
-                    # First clamp to eps bound
-                    poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
-                    # Then clamp to valid image range
+                    if self.args.visreg is not None and "soft" in self.args.visreg:
+                        poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
+                    else:
+                        poison_delta.data = torch.clamp(poison_delta.data, min=-self.args.eps / ds / 255, max=self.args.eps / ds / 255)
+            
+                    # Then project to the poison bounds
                     poison_delta.data = torch.clamp(poison_delta.data, 
                                                     min=-dm / ds - poison_bounds, 
                                                     max=(1 - dm) / ds - poison_bounds)
-
-            else:
-                with torch.no_grad():
-                    # Projection Step
-                    # First clamp to eps bound
-                    poison_delta.data = torch.clamp(poison_delta.data, min=-self.args.eps / ds / 255, max=self.args.eps / ds / 255)
-                    # Then clamp to valid image range
-                    poison_delta.data = torch.clamp(poison_delta.data, 
-                                                    min=-dm / ds - poison_bounds, 
-                                                    max=(1 - dm) / ds - poison_bounds)
+                    
+                    
 
             source_losses = source_losses / (batch + 1)
             with torch.no_grad():
@@ -381,10 +453,15 @@ class _Witch():
             
         # If a poisoned id position is found, the corresponding pattern is added here:
         if len(batch_positions) > 0:
-            delta_slice = poison_delta[poison_slices].detach().to(**self.setup)
+            delta_slice = poison_delta[poison_slices].detach().to(**self.setup)  # Remove .detach()
             if self.args.clean_grad:
                 delta_slice = torch.zeros_like(delta_slice)
-            delta_slice.requires_grad_()  # TRACKING GRADIENTS FROM HERE
+            delta_slice.requires_grad_()  # Ensure gradients are enabled
+    
+            if self.args.attackoptim == "cw":
+                delta_slice = 0.5 * (torch.tanh(delta_slice) + 1)
+                delta_slice.retain_grad()
+                
             poison_images = inputs[batch_positions]
             inputs[batch_positions] += delta_slice
 
@@ -433,19 +510,19 @@ class _Witch():
 
             if NORMALIZE:
                 inputs = normalization(inputs)
-
+            
             closure = self._define_objective(inputs, labels, criterion, self.sources_train, self.target_classes, self.true_classes)
             loss, prediction = victim.compute(closure, self.source_grad, self.source_clean_grad, self.source_gnorm, delta_slice)
             
             if self.args.clean_grad:
                 delta_slice.data = poison_delta[poison_slices].detach().to(**self.setup)
-
+            
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
                 delta_slice = self._pgd_step(delta_slice, poison_images, self.tau0, kettle.dm, kettle.ds)
                 # Return slice to CPU:
                 poison_delta[poison_slices] = delta_slice.detach().to(device=torch.device('cpu'))
-            elif self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
+            elif self.args.attackoptim in ['cw', 'Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
                 poison_delta.grad[poison_slices] = delta_slice.grad.detach().to(device=torch.device('cpu'))
             else:
                 raise NotImplementedError('Unknown attack optimizer.')

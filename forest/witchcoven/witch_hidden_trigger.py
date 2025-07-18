@@ -20,7 +20,7 @@ class WitchHTBD(_Witch):
         validated_batch_size = max(min(kettle.args.pbatch, len(kettle.poisonset)), 1)
 
         if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
-            # poison_delta.requires_grad_()
+            poison_delta.requires_grad_()
             if self.args.attackoptim in ['Adam', 'signAdam']:
                 att_optimizer = torch.optim.Adam([poison_delta], lr=self.tau0, weight_decay=0)
             elif self.args.attackoptim in ['momSGD', 'momPGD']:
@@ -48,8 +48,6 @@ class WitchHTBD(_Witch):
             poison_bounds = None
 
         for step in range(self.args.attackiter):
-            # if step == 1999 or step == 3999:
-            #     self.tau0 *= 0.95
             source_losses = 0
             poison_correct = 0
             for batch, example in enumerate(dataloader):
@@ -84,19 +82,17 @@ class WitchHTBD(_Witch):
                 scheduler.step()
             att_optimizer.zero_grad(set_to_none=False)
             
-            if self.args.visreg is not None and "soft" in self.args.visreg:
+            if self.args.attackoptim != "cw":
                 with torch.no_grad():
-                    # Projection Step
-                    # poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
-                    poison_delta.data = torch.clamp(poison_delta.data, min=-poison_bounds, max=1.0 - poison_bounds)
-
-            else:
-                with torch.no_grad():
-                    # Projection Step
-                    poison_delta.data = torch.max(torch.min(poison_delta, self.args.eps /
-                                                            ds / 255), -self.args.eps / ds / 255)
-                    poison_delta.data = torch.max(torch.min(poison_delta, (1 - dm) / ds -
-                                                            poison_bounds), -dm / ds - poison_bounds)
+                    if self.args.visreg is not None and "soft" in self.args.visreg:
+                        poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
+                    else:
+                        poison_delta.data = torch.clamp(poison_delta.data, min=-self.args.eps / ds / 255, max=self.args.eps / ds / 255)
+            
+                    # Then project to the poison bounds
+                    poison_delta.data = torch.clamp(poison_delta.data, 
+                                                    min=-dm / ds - poison_bounds, 
+                                                    max=(1 - dm) / ds - poison_bounds)
 
             source_losses = source_losses / (batch + 1)
             with torch.no_grad():
@@ -155,6 +151,10 @@ class WitchHTBD(_Witch):
             if self.args.clean_grad:
                 delta_slice = torch.zeros_like(delta_slice)
             delta_slice.requires_grad_()  # TRACKING GRADIENTS FROM HERE
+            
+            if self.args.attackoptim == "cw":
+                delta_slice = 0.5 * (torch.tanh(delta_slice) + 1)
+                
             poison_images = inputs[batch_positions]
             inputs[batch_positions] += delta_slice
 

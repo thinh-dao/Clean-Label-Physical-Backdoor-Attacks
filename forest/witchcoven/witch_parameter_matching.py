@@ -2,9 +2,10 @@ import torch
 import numpy as np
 import torch.nn as nn
 import copy
+import random
 
 from forest.victims.training import run_step
-from forest.utils import write, ReparamModule
+from forest.utils import write, ReparamModule, cw_loss
 from forest.consts import FINETUNING_LR_DROP, PIN_MEMORY, NORMALIZE, NON_BLOCKING
 from forest.witchcoven import _Witch
 from forest.data.datasets import Subset, ConcatDataset, LabelPoisonTransform
@@ -12,7 +13,7 @@ from torch.utils.data import DataLoader
 from forest.data.datasets import normalization
 
 class WitchMTTP(_Witch):
-    def _distill(self, poison_delta, poison_bounds, poison_dataloader, student_net, starting_params, target_params, kettle, syn_steps=2, syn_lr=0.001, loss_fn=torch.nn.CrossEntropyLoss()):
+    def _distill(self, poison_delta, poison_bounds, poison_dataloader, student_net, starting_params, target_params, kettle, syn_steps=1, syn_lr=0.001, loss_fn=torch.nn.CrossEntropyLoss()):
         """
         Train a student network on poisoned data to match target network parameters.
         Returns the distillation loss.
@@ -46,16 +47,17 @@ class WitchMTTP(_Witch):
                     inputs = normalization(inputs)
                 
                 # Forward pass through student network
-                outputs = student_net(inputs, flat_param=student_params[-1].to(**self.setup))
+                forward_params = student_params[-1].to(**self.setup)
+                outputs = student_net(inputs, flat_param=forward_params)
                 student_loss = loss_fn(outputs, labels)
 
                 loss += student_loss.item()
                 
                 # Compute gradients for parameters
-                grad = torch.autograd.grad(student_loss, student_params[-1], create_graph=True, retain_graph=True)[0]
+                grad = torch.autograd.grad(student_loss, forward_params, create_graph=True, retain_graph=True)[0]
                 
                 # Manual parameter update
-                updated_params = student_params[-1] - syn_lr * grad
+                updated_params = forward_params - syn_lr * grad
                 student_params.append(updated_params.cpu())
             
             loss /= len(poison_dataloader)
@@ -64,10 +66,13 @@ class WitchMTTP(_Witch):
         # Compute the distillation loss
         param_loss = torch.nn.functional.mse_loss(student_params[-1], target_params, reduction="mean")
         param_dist = torch.nn.functional.mse_loss(starting_params, target_params, reduction="mean")
-        grand_loss = param_loss / param_dist.detach()
+        passenger_loss = param_loss / param_dist.detach()
 
         # Backpropagate through the entire training process
-        grand_loss.backward()
+        regularized_loss = self.get_regularized_loss(poison_delta, inputs, tau=self.args.eps/255)
+        attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
+        
+        attacker_loss.backward()
 
         # Update poison_delta (PGD-like optimizers)
         if self.args.attackoptim in ['PGD', 'GD'] and len(batch_positions) > 0:
@@ -76,10 +81,10 @@ class WitchMTTP(_Witch):
                 poison_image = inputs[batch_positions][i].detach()
                 updated_delta = self._pgd_step(delta_slice, poison_image, self.tau0, kettle.dm, kettle.ds)
                 poison_delta.data[slice_idx] = updated_delta.detach().cpu()
+        
+        return passenger_loss.item()
 
-        return grand_loss.item()
-
-    def _distill_full_data(self, poison_delta, poison_bounds, poison_dataloader, student_net, starting_params, target_params, kettle, syn_steps=2, syn_lr=0.001, loss_fn=torch.nn.CrossEntropyLoss()):
+    def _distill_full_data(self, poison_delta, poison_bounds, poison_dataloader, student_net, starting_params, target_params, kettle, syn_steps=1, syn_lr=0.001, loss_fn=torch.nn.CrossEntropyLoss()):
         # Initialize tracking variables
         poison_delta.requires_grad_(True)  # Ensure poison_delta tracks gradients
 
@@ -198,7 +203,13 @@ class WitchMTTP(_Witch):
         # Calculate final loss with MSE between final parameters and target parameters
         param_loss = torch.nn.functional.mse_loss(student_params[-1], target_params, reduction="mean")
         param_dist = torch.nn.functional.mse_loss(starting_params, target_params, reduction="mean")
-        grand_loss = param_loss / param_dist.detach()
+        passenger_loss = param_loss / param_dist.detach()
+        
+        # Backpropagate through the entire training process
+        regularized_loss = self.get_regularized_loss(poison_delta, inputs, tau=self.args.eps/255)
+        attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
+        
+        attacker_loss.backward()
         
         # Assign gradients manually if needed
         if torch.norm(poison_delta_gradients) > 0:
@@ -210,13 +221,16 @@ class WitchMTTP(_Witch):
         for _ in student_params:
             del _
 
-        return grand_loss
+        return passenger_loss.item()
 
-    def _train_backdoor_net(self, backdoor_trainloader, backdoor_testloader, victim, kettle, lr, epochs, num_experts=1):
+    def _train_backdoor_net(self, backdoor_trainloader, backdoor_testloader, bkd_indices, victim, kettle, lr, epochs, num_experts=3):
         """Train a backdoor network and collect multiple expert trajectories."""
         # Initialize list to store all expert trajectories
         all_trajectories = []
-        
+
+        # Stack original parameters to a single vector for distance calculation
+        original_params = torch.cat([p.data.reshape(-1) for p in victim.model.parameters()], 0)
+
         # Train multiple expert models if requested
         for expert_idx in range(num_experts):
             print(f"Training expert {expert_idx+1}/{num_experts}")
@@ -231,8 +245,6 @@ class WitchMTTP(_Witch):
                 weight_decay=5e-4, 
                 nesterov=True
             )
-            
-            train_criterion = nn.CrossEntropyLoss()
             
             # Initialize trajectory for this expert
             trajectory = []
@@ -250,17 +262,14 @@ class WitchMTTP(_Witch):
 
             evaluate_every = max(1, epochs // 3)
             for epoch in range(1, epochs+1):
-                avg_loss, accuracy = self._train_one_epoch(
-                    model=backdoor_net, 
-                    trainloader=backdoor_trainloader, 
-                    criterion=train_criterion, 
-                    optimizer=backdoor_optimizer, 
+                avg_loss, accuracy = self._train_one_backdoor_epoch(
+                    model=backdoor_net,
+                    optimizer=backdoor_optimizer,
+                    backdoor_trainloader=backdoor_trainloader,
+                    bkd_indices=bkd_indices,
                     diff_augment=kettle.augment,
                     scheduler=torch.optim.lr_scheduler.CosineAnnealingLR(backdoor_optimizer, T_max=epochs)
                 )
-
-                write(f'Expert {expert_idx+1}, Epoch {epoch}/{epochs}: Train Loss: {avg_loss:.4f}, Train Accuracy: {accuracy:.4f}', self.args.output)
-                print(f'Expert {expert_idx+1}, Epoch {epoch}/{epochs}: Train Loss: {avg_loss:.4f}, Train Accuracy: {accuracy:.4f}')
 
                 # Collect model parameters after each epoch
                 if hasattr(backdoor_net, 'module'):
@@ -269,6 +278,13 @@ class WitchMTTP(_Witch):
                     epoch_params = torch.cat([p.data.cpu().reshape(-1) for p in backdoor_net.parameters()], 0)
                 
                 trajectory.append(epoch_params)
+                
+                # Calculate parameter distance from original
+                param_distance = torch.norm(epoch_params - original_params.cpu()).item()
+
+                
+                write(f'Expert {expert_idx+1}, Epoch {epoch}/{epochs}: Train Loss: {avg_loss:.4f}, Train Accuracy: {accuracy:.4f}, Param Distance: {param_distance:.6f}', self.args.output)
+                print(f'Expert {expert_idx+1}, Epoch {epoch}/{epochs}: Train Loss: {avg_loss:.4f}, Train Accuracy: {accuracy:.4f}, Param Distance: {param_distance:.6f}')
 
                 if epoch % evaluate_every == 0 or epoch == epochs:
                     clean_acc, poisoned_acc, clean_loss, poisoned_loss = self._validation(
@@ -276,10 +292,9 @@ class WitchMTTP(_Witch):
                     )
                     write(f'Expert {expert_idx+1}, Epoch {epoch}/{epochs}: Clean Accuracy: {clean_acc:.4f}, Clean Loss: {clean_loss:.4f}, Poisoned Accuracy: {poisoned_acc:.4f}, Poisoned Loss: {poisoned_loss:.4f}', self.args.output)
                     print(f'Expert {expert_idx+1}, Epoch {epoch}/{epochs}: Clean Accuracy: {clean_acc:.4f}, Clean Loss: {clean_loss:.4f}, Poisoned Accuracy: {poisoned_acc:.4f}, Poisoned Loss: {poisoned_loss:.4f}')
-            
+        
             # Add completed trajectory to the collection
             all_trajectories.append(trajectory)
-
         return all_trajectories
     
     def _run_trial(self, victim, kettle):
@@ -329,35 +344,50 @@ class WitchMTTP(_Witch):
         else:
             raise ValueError(f'Unknown attack optimizer: {self.args.attackoptim}')
         
+        syn_lr = torch.tensor(self.args.syn_lr).to(self.setup['device']).requires_grad_(True)
+        lr_optimizer = torch.optim.SGD([syn_lr], lr=1e-7, momentum=0.9, weight_decay=0, nesterov=True)
+        
         # Initialize expert training trajectories (backdoor models)
-        backdoor_trainloader, backdoor_testloader = self._get_backdoor_data(kettle, backdoor_training_mode=self.args.backdoor_training_mode)
+        backdoor_trainloader, backdoor_testloader, bkd_indices = self._get_backdoor_data(kettle, backdoor_training_mode=self.args.backdoor_training_mode)
         all_trajectories = self._train_backdoor_net(
-            backdoor_trainloader, 
-            backdoor_testloader, 
-            victim, 
-            kettle, 
-            lr=self.args.finetuning_lr, 
-            epochs=self.args.backdoor_training_epoch, 
+            backdoor_trainloader,
+            backdoor_testloader,
+            bkd_indices,
+            victim,
+            kettle,
+            lr=self.args.finetuning_lr,
+            epochs=self.args.backdoor_training_epoch,
             num_experts=self.args.num_experts
         )
+        
+        # Average trajectories
+        if self.args.average_trajectory:
+            avg_trajectory = []
+            for i in range(len(all_trajectories[0])):
+                avg_trajectory.append(torch.stack([traj[i] for traj in all_trajectories]).mean(dim=0))
 
         for step in range(self.args.attackiter):
-            sample_traj_idx = np.random.randint(0, len(all_trajectories))
+            if self.args.average_trajectory:
+                chosen_trajectory = avg_trajectory
+            else:
+                sample_traj_idx = np.random.randint(0, len(all_trajectories))
+                chosen_trajectory = all_trajectories[sample_traj_idx]
+            
             if self.args.sequential_generation:
-                expansion_end_epoch = int(self.args.attackiter * 0.75)
-                if len(all_trajectories[sample_traj_idx]) - 1 < self.args.expert_epochs:
+                expansion_end_epoch = int(self.args.retrain_iter * 0.75)
+                if len(chosen_trajectory) - 1 < self.args.expert_epochs:
                     max_start_epoch = 0
                 else:
-                    max_start_epoch = int ( (len(all_trajectories[sample_traj_idx]) - 1 - self.args.expert_epochs) * (step / expansion_end_epoch) )
+                    max_start_epoch = int ( (len(chosen_trajectory) - 1 - self.args.expert_epochs) * (step / expansion_end_epoch) )
                 start_params_idx = np.random.randint(0, max_start_epoch+1)
             else:
-                max_start_epoch = max(len(all_trajectories[sample_traj_idx]) - 1 - self.args.expert_epochs, 0)
+                max_start_epoch = max(len(chosen_trajectory) - 1 - self.args.expert_epochs, 0)
                 start_params_idx = np.random.randint(0, max_start_epoch+1)
 
-            starting_params = all_trajectories[sample_traj_idx][start_params_idx]
+            starting_params = chosen_trajectory[start_params_idx]
 
-            target_params_idx = min(start_params_idx + self.args.expert_epochs, len(all_trajectories[sample_traj_idx]) - 1)
-            target_params = all_trajectories[sample_traj_idx][target_params_idx]
+            target_params_idx = min(start_params_idx + self.args.expert_epochs, len(chosen_trajectory) - 1)
+            target_params = chosen_trajectory[target_params_idx]
 
             # Create student network
             student_net = copy.deepcopy(victim.model)
@@ -367,6 +397,9 @@ class WitchMTTP(_Witch):
             else:
                 student_net = ReparamModule(student_net)
 
+            att_optimizer.zero_grad(set_to_none=False)
+            lr_optimizer.zero_grad(set_to_none=False)
+                        
             # Distill from backdoor model to student model
             if self.args.full_data:
                 distill_loss = self._distill_full_data(
@@ -378,7 +411,7 @@ class WitchMTTP(_Witch):
                     target_params=target_params, 
                     kettle=kettle,
                     syn_steps=self.args.syn_steps,
-                    syn_lr=self.args.syn_lr
+                    syn_lr=syn_lr
                 )
             else:
                 distill_loss = self._distill(
@@ -390,7 +423,7 @@ class WitchMTTP(_Witch):
                     target_params=target_params, 
                     kettle=kettle,
                     syn_steps=self.args.syn_steps,
-                    syn_lr=self.args.syn_lr
+                    syn_lr=syn_lr
                 )
 
             # Update poison perturbations
@@ -401,33 +434,19 @@ class WitchMTTP(_Witch):
             
             if self.args.scheduling:
                 scheduler.step()
-
-            att_optimizer.zero_grad(set_to_none=False)
             
             # Project perturbations to valid range
-            with torch.no_grad():
-                if self.args.visreg != None and "soft" in self.args.visreg:
-                    # Projection Step for soft regularization
-                    poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
-                    # Then clamp to valid image range
-                    poison_delta.data = torch.clamp(
-                        poison_delta.data, 
-                        min=-dm / ds - poison_bounds, 
-                        max=(1 - dm) / ds - poison_bounds
-                    )
-                else:
-                    # Projection Step for eps-bounded perturbations
-                    poison_delta.data = torch.clamp(
-                        poison_delta.data, 
-                        min=-self.args.eps / ds / 255, 
-                        max=self.args.eps / ds / 255
-                    )
-                    # Then clamp to valid image range
-                    poison_delta.data = torch.clamp(
-                        poison_delta.data, 
-                        min=-dm / ds - poison_bounds, 
-                        max=(1 - dm) / ds - poison_bounds
-                    )
+            if self.args.attackoptim != "cw":
+                with torch.no_grad():
+                    if self.args.visreg is not None and "soft" in self.args.visreg:
+                        poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
+                    else:
+                        poison_delta.data = torch.clamp(poison_delta.data, min=-self.args.eps / ds / 255, max=self.args.eps / ds / 255)
+            
+                    # Then project to the poison bounds
+                    poison_delta.data = torch.clamp(poison_delta.data, 
+                                                    min=-dm / ds - poison_bounds, 
+                                                    max=(1 - dm) / ds - poison_bounds)
 
             # Calculate visual loss (L2 norm of perturbations)
             with torch.no_grad():
@@ -458,7 +477,6 @@ class WitchMTTP(_Witch):
                     
                     if self.args.retrain_scenario == 'from-scratch':
                         victim.initialize()
-                        print('Model reinitialized to random seed.')
                     elif self.args.retrain_scenario == 'finetuning':
                         if self.args.load_feature_repr:
                             victim.load_feature_representation()
@@ -473,18 +491,19 @@ class WitchMTTP(_Witch):
                     print('Retraining backdoor model...')
 
                     all_trajectories = self._train_backdoor_net(
-                        backdoor_trainloader, 
-                        backdoor_testloader, 
-                        victim, 
-                        kettle, 
-                        lr=self.args.finetuning_lr, 
-                        epochs=self.args.backdoor_training_epoch, 
+                        backdoor_trainloader,
+                        backdoor_testloader,
+                        bkd_indices,
+                        victim,
+                        kettle,
+                        lr=self.args.finetuning_lr,
+                        epochs=self.args.backdoor_training_epoch,
                         num_experts=self.args.num_experts
                     )
 
         return poison_delta, distill_loss
 
-    def _get_backdoor_data(self, data, backdoor_training_mode='all-data'):
+    def _get_backdoor_data(self, data, backdoor_training_mode='full-data'):
         """Create backdoor training data by applying label transforms."""
         target_class = data.poison_setup['target_class']
         
@@ -500,38 +519,42 @@ class WitchMTTP(_Witch):
         # Create poisoned dataset with label transform
         label_poison_transform = LabelPoisonTransform(mapping={source_class: target_class})
         poisoned_triggerset = Subset(
-            data.triggerset, 
-            data.triggerset_dist[source_class], 
-            transform=data.trainset.transform, 
+            data.triggerset,
+            data.triggerset_dist[source_class],
+            transform=data.trainset.transform,
             target_transform=label_poison_transform
         )
 
         # Initialize backdoor trainset
-        if backdoor_training_mode == 'all-data':
+        if backdoor_training_mode == 'full-data':
             backdoor_trainset = ConcatDataset([data.trainset, poisoned_triggerset])
-        else:
+            bkd_indices = set(range(len(data.trainset), len(backdoor_trainset)))
+        elif backdoor_training_mode == 'poison-only':
             backdoor_trainset = poisoned_triggerset
+            bkd_indices = set(range(len(backdoor_trainset)))
+        else:
+            raise ValueError(f"Invalid backdoor training mode: {backdoor_training_mode}")
         
         # Create data loaders
         backdoor_trainloader = DataLoader(
-            backdoor_trainset, 
-            batch_size=self.args.batch_size, 
+            backdoor_trainset,
+            batch_size=self.args.batch_size,
             shuffle=True,
-            drop_last=False, 
-            num_workers=4, 
+            drop_last=False,
+            num_workers=4,
             pin_memory=PIN_MEMORY
         )
         
         backdoor_testloader = DataLoader(
-            poisoned_triggerset, 
-            batch_size=self.args.batch_size*2, 
+            poisoned_triggerset,
+            batch_size=self.args.batch_size*2,
             shuffle=False,
-            drop_last=False, 
-            num_workers=4, 
+            drop_last=False,
+            num_workers=4,
             pin_memory=PIN_MEMORY
         )
 
-        return backdoor_trainloader, backdoor_testloader
+        return backdoor_trainloader, backdoor_testloader, bkd_indices
 
     def _validation(self, model, clean_testloader, poisoned_testloader):
         """Evaluate model performance on clean and poisoned data."""
@@ -572,43 +595,72 @@ class WitchMTTP(_Witch):
 
         return clean_acc, poisoned_acc, clean_loss, poisoned_loss
 
-    def _train_one_epoch(self, model, trainloader, criterion, optimizer, diff_augment=None, scheduler=None):
-        """Train model for one epoch."""
+    def _train_one_backdoor_epoch(self, model, optimizer, backdoor_trainloader, bkd_indices, diff_augment=None, scheduler=None):
+        """Train model for one epoch with backdoor training."""
+        train_criterion = nn.CrossEntropyLoss(reduction='none')  # Changed to 'none' for per-sample loss
+        source_criterion = cw_loss if self.args.source_criterion == "cw" else None
+        
         model.train()
         total_loss = 0
         correct = 0
         total = 0
         
-        # Get device from model or use the setup device
         device = getattr(model, 'device', self.setup['device'])
         
-        for inputs, targets, idx in trainloader:            
-            inputs, targets = inputs.to(device), targets.to(device)
+        # Pre-convert bkd_indices to tensor if it exists and is not empty
+        bkd_indices_tensor = None
+        if bkd_indices:
+            bkd_indices_tensor = torch.tensor(list(bkd_indices), device=device, dtype=torch.long)
+        
+        for inputs, targets, indices in backdoor_trainloader:
+            inputs, targets = inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+            indices = indices.to(device, non_blocking=True)  # Ensure indices are on correct device
             
             if diff_augment is not None:
                 inputs = diff_augment(inputs)
-                
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
             
             optimizer.zero_grad()
-            loss.backward()
             
+            outputs = model(inputs)
+
+            if source_criterion and bkd_indices_tensor is not None:
+                # Create boolean mask for backdoor samples
+                bkd_mask = torch.isin(indices, bkd_indices_tensor)
+                
+                # Calculate losses per sample
+                train_losses = train_criterion(outputs, targets)
+                
+                if self.args.source_criterion == "cw":
+                    source_losses = source_criterion(outputs, targets, reduction="none")
+                else:
+                    source_losses = train_losses  # Fallback if source_riterion is not properly initialized
+                
+                # Combine losses using boolean indexing
+                loss = torch.mean(torch.where(bkd_mask, source_losses, train_losses))
+            else:
+                # Standard cross-entropy loss
+                loss = train_criterion(outputs, targets).mean()
+            
+            loss.backward()
             optimizer.step()
+            
             if scheduler is not None:
                 scheduler.step()
                 
+            # Accumulate statistics
             total_loss += loss.item()
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
         
-        avg_loss = total_loss / len(trainloader)
+        # Calculate final metrics
+        avg_loss = total_loss / len(backdoor_trainloader)
         accuracy = correct / total
+        
         return avg_loss, accuracy
 
 class WitchMTTP_Tesla(_Witch):
-    def _distill(self, poison_delta, poison_bounds, poison_dataloader, student_net, starting_params, target_params, kettle, syn_steps=2, syn_lr=0.001, loss_fn=torch.nn.CrossEntropyLoss()):
+    def _distill_full_data(self, poison_delta, poison_bounds, poison_dataloader, student_net, starting_params, target_params, kettle, syn_steps=1, syn_lr=0.001, loss_fn=torch.nn.CrossEntropyLoss()):
         # Initialize tracking variables
         poison_delta.requires_grad_(True)  # Ensure poison_delta tracks gradients
 

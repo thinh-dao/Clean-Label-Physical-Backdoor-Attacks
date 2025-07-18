@@ -112,11 +112,11 @@ class _VictimBase:
             self._iterate(kettle, poison_delta=None, max_epoch=max_epoch) # Validate poison
             if self.args.dryrun == False and self.args.save_clean_model:
                 if self.args.ensemble == 1:
-                    save_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_clean.pth")
+                    save_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_{self.args.dataset.upper()}_{self.args.optimization}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
                     self.save_model(self.model, save_path)
                 else:
                     for idx, model in enumerate(self.models):
-                        save_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[idx].upper()}_clean.pth")
+                        save_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[idx].upper()}_{self.args.dataset.upper()}_{self.args.optimization}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
                         self.save_model(model, save_path)
         else: 
             self.load_trained_model(kettle)

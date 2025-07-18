@@ -28,10 +28,10 @@ def training_strategy(model_name, args):
         defs.batch_size = args.batch_size
     if args.lr is not None:
         defs.lr = args.lr
-    if args.noaugment:
-        defs.augmentations = False
-    else:
+    if args.augment:
         defs.augmentations = args.data_aug
+    else:
+        defs.augmentations = False
 
     # Modifications to gradient noise settings
     if defs.privacy is not None:

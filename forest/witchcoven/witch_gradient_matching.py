@@ -1,8 +1,11 @@
 """Main class, holding information about models and training/testing routines."""
 
 import torch
+# Disable efficient attention to avoid second-order derivative issues
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
 from ..consts import BENCHMARK, NON_BLOCKING, NORMALIZE
-from ..utils import bypass_last_layer, cw_loss, total_variation_loss, upwind_tv
+from ..utils import bypass_last_layer, cw_loss
 from ..victims.training import _split_data
 torch.backends.cudnn.benchmark = BENCHMARK
 from .witch_base import _Witch
@@ -60,7 +63,6 @@ class WitchGradientMatching(_Witch):
         else:
             indices = torch.arange(len(source_grad))
 
-
         for i in indices:
             if self.args.loss in ['scalar_product', *SIM_TYPE]:
                 passenger_loss -= (source_grad[i] * poison_grad[i]).sum()
@@ -99,42 +101,6 @@ class WitchGradientMatching(_Witch):
                 passenger_loss += 0.5 * poison_grad[i].pow(2).sum() / source_gnorm
 
         return passenger_loss
-
-    def get_regularized_loss(self, perturbations, inputs, tau):
-        if self.args.visreg == 'l1':
-            regularized_loss = torch.mean(torch.abs(perturbations))
-        elif self.args.visreg == 'l2':
-            regularized_loss = torch.mean(torch.linalg.matrix_norm(perturbations).pow(2))
-        elif self.args.visreg == 'UTV':
-            regularized_loss = upwind_tv(perturbations)
-        elif self.args.visreg == 'TV+l1':
-            regularized_loss = torch.mean(torch.abs(perturbations)) + 5 * total_variation_loss(perturbations)
-        elif self.args.visreg == 'TV+l2':
-            regularized_loss = torch.mean(torch.linalg.matrix_norm(perturbations).pow(2)) + 5 * total_variation_loss(perturbations)
-        elif self.args.visreg == 'soft_l2':
-            max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
-            relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
-            regularized_loss = torch.mean(torch.linalg.matrix_norm(perturbations - tau).pow(2))
-        elif self.args.visreg == 'soft_l_inf':
-            max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
-            relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
-            # regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean()
-            # regularized_loss = torch.clamp(perturbations.abs() - tau, min=0.0).mean()
-            regularized_loss = torch.linalg.norm(perturbations.abs().flatten() - tau.flatten(), ord=1).mean()
-        elif self.args.visreg == 'TV+soft_l_inf':
-            max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
-            relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
-            regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean() + total_variation_loss(perturbations)
-        elif self.args.visreg == 'UTV+soft_l_inf':
-            max_vals_per_channel = torch.amax(inputs.abs(), dim=(1))
-            relative_mask = inputs.abs() / max_vals_per_channel[:, None, :, :]
-            # regularized_loss = torch.clamp(perturbations.abs() - tau * relative_mask, min=0.0).mean() + 5 * upwind_tv(perturbations)
-            regularized_loss = torch.clamp(perturbations.abs() - tau, min=0.0).mean() + 5 * upwind_tv(perturbations)
-        else:
-            if self.args.visreg != None:
-                raise ValueError(f"{self.args.visreg} regularization not defined")
-            regularized_loss = torch.tensor(0)
-        return regularized_loss
 
 class WitchGradientMatchingNoisy(WitchGradientMatching):
     """Brew passenger poison with given arguments.
@@ -229,6 +195,11 @@ class WitchGradientMatchingHidden(WitchGradientMatching):
             if self.args.clean_grad:
                 delta_slice = torch.zeros_like(delta_slice)
             delta_slice.requires_grad_()  # TRACKING GRADIENTS FROM HERE
+
+            if self.args.attackoptim == "cw":
+                delta_slice = 0.5 * (torch.tanh(delta_slice) + 1)
+                delta_slice.retain_grad()  # Ensure the transformed tensor still requires gradients
+                
             poison_images = inputs[batch_positions]
             inputs[batch_positions] += delta_slice
 
@@ -264,8 +235,6 @@ class WitchGradientMatchingHidden(WitchGradientMatching):
                                                               temp_sources, temp_fake_label, steps=victim.defs.novel_defense['steps'])
                 inputs = inputs + delta
                 clean_inputs = clean_inputs + delta
-
-
 
             # Define the loss objective and compute gradients
             if self.args.source_criterion in ['cw', 'carlini-wagner']:
