@@ -49,17 +49,14 @@ class KettleDistributed(KettleSingle):
     """
 
     def __init__(self, args, batch_size, augmentations, mixing_method=None,
-                 setup=dict(device=torch.device('cpu'), dtype=torch.float), path=None):
+                 setup=dict(device=torch.device('cpu'), dtype=torch.float)):
         """Initialize with given specs..."""
         self.args, self.setup = args, setup
         self.batch_size = batch_size
         self.augmentations = augmentations
         self.mixing_method = mixing_method
 
-        if path == None:
-            path = os.path.join('datasets', self.args.dataset, self.args.trigger)
-
-        self.trainset, self.validset = construct_datasets(path, args, normalize=NORMALIZE)
+        self.trainset, self.validset = construct_datasets(args, normalize=NORMALIZE)
 
         self.trainset_class_to_idx = self.trainset.class_to_idx
         self.trainset_class_names = self.trainset.classes

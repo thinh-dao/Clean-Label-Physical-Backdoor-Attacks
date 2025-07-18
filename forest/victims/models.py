@@ -4,6 +4,10 @@ import torch
 import torch.nn as nn
 import math
 import os
+import timm
+
+from einops import rearrange, repeat
+from torch.nn import Parameter
 from torch.nn import functional as F
 from torchvision.models import resnet50, resnet18, vgg11, mobilenet_v2, mobilenet_v3_small, ResNet50_Weights, ResNet18_Weights, VGG11_Weights, MobileNet_V2_Weights, MobileNet_V3_Small_Weights
 from torchvision.models.resnet import BasicBlock, Bottleneck
@@ -42,22 +46,39 @@ def get_model(model_name, num_classes=10, pretrained=True):
             model = InceptionResnetV1(pretrained='vggface2', classify=True, num_classes=num_classes)
         else:
             model = InceptionResnetV1(pretrained=None, classify=True, num_classes=num_classes)
-    elif model_name.lower() == 'mobilenetv2':
+    elif model_name.lower() == 'mobilenetv2_imagenet':
         model = mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1)
         model.classifier[-1] = nn.Linear(model.last_channel, num_classes)
-    elif model_name.lower() == 'mobilenetv3':
+    elif model_name.lower() == 'mobilenetv3_imagenet':
         model = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.IMAGENET1K_V1)
         model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
+    elif model_name.lower() == 'vit_face':
+        model = ViTs_Face(
+            image_size=112,
+            patch_size=8,
+            ac_patch_size=12,
+            pad=4,
+            dim=512,
+            depth=20,
+            heads=8,
+            mlp_dim=2048,
+            dropout=0.1,
+            emb_dropout=0.1,
+            num_classes=num_classes,
+        )
+        if pretrained:
+            model.load_state_dict(torch.load('pretrained/ViT_P12S8.pth'), strict=False)
+    elif model_name.lower() == 'deit_tiny':
+        model = timm.create_model('deit_tiny_patch16_224', pretrained=True)
+        model.head = nn.Linear(model.head.in_features, num_classes)  # Replace classifier head
     else:
         raise NotImplementedError(f'Model {model_name} not implemented')
     return model
-
 
 def conv3x3(in_planes, out_planes, stride=1):
     """3x3 convolution with padding"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
                      padding=1, bias=False)
-
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -173,24 +194,29 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, return_activation=False):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
         x = self.maxpool(x)
 
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        activation1 = self.layer1(x)
+        activation2 = self.layer2(activation1)
+        activation3 = self.layer3(activation2)
+        x = self.layer4(activation3)
 
         x = self.avgpool(x)
         
         if not self.include_top:
+            if return_activation:
+                return x, activation1, activation2, activation3
             return x
         
         x = x.view(x.size(0), -1)
         x = self.fc(x)
+        
+        if return_activation:
+            return x, activation1, activation2, activation3
         return x
 
 class Vgg_face_dag(nn.Module):
@@ -770,3 +796,133 @@ class MobileNetV2(nn.Module):
             elif isinstance(m, nn.Linear):
                 m.weight.data.normal_(0, 0.01)
                 m.bias.data.zero_()
+
+################# Face-Transformer #################
+
+
+MIN_NUM_PATCHES = 16  # Minimum number of patches for attention to be effective
+
+class Residual(nn.Module):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+    def forward(self, x, **kwargs):
+        return self.fn(x, **kwargs) + x
+
+class PreNorm(nn.Module):
+    def __init__(self, dim, fn):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.fn = fn
+    def forward(self, x, **kwargs):
+        return self.fn(self.norm(x), **kwargs)
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout = 0.):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+class Attention(nn.Module):
+    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.):
+        super().__init__()
+        inner_dim = dim_head * heads
+        self.heads = heads
+        self.scale = dim ** -0.5
+
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x, mask = None):
+        b, n, _, h = *x.shape, self.heads
+        qkv = self.to_qkv(x).chunk(3, dim = -1)
+
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), qkv)
+        dots = torch.einsum('bhid,bhjd->bhij', q, k) * self.scale
+        mask_value = -torch.finfo(dots.dtype).max
+        
+        if mask is not None:
+            mask = F.pad(mask.flatten(1), (1, 0), value = True)
+            assert mask.shape[-1] == dots.shape[-1], 'mask has incorrect dimensions'
+            mask = mask[:, None, :] * mask[:, :, None]
+            dots.masked_fill_(~mask, mask_value)
+            del mask
+
+        attn = dots.softmax(dim=-1)
+
+        out = torch.einsum('bhij,bhjd->bhid', attn, v)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        out =  self.to_out(out)
+
+        return out
+
+class Transformer(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                Residual(PreNorm(dim, Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout))),
+                Residual(PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout)))
+            ]))
+    def forward(self, x, mask = None):
+        for attn, ff in self.layers:
+            x = attn(x, mask = mask)
+            x = ff(x)
+        return x
+
+class ViTs_Face(nn.Module):
+    def __init__(self, image_size, patch_size, ac_patch_size,
+                         pad, dim, depth, heads, mlp_dim, num_classes, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0.):
+        super().__init__()
+        assert image_size % patch_size == 0, 'Image dimensions must be divisible by the patch size.'
+        num_patches = (image_size // patch_size) ** 2
+        patch_dim = channels * ac_patch_size ** 2
+        assert num_patches > MIN_NUM_PATCHES, f'your number of patches ({num_patches}) is way too small for attention to be effective (at least 16). Try decreasing your patch size'
+        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+
+        self.patch_size = patch_size
+        self.soft_split = nn.Unfold(kernel_size=(ac_patch_size, ac_patch_size), stride=(self.patch_size, self.patch_size), padding=(pad, pad))
+
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+        self.patch_to_embedding = nn.Linear(patch_dim, dim)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.dropout = nn.Dropout(emb_dropout)
+
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+
+        self.pool = pool
+        self.to_latent = nn.Identity()
+
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, num_classes)
+        )
+
+    def forward(self, img, mask=None):
+        x = self.soft_split(img).transpose(1, 2)
+        x = self.patch_to_embedding(x)
+        b, n, _ = x.shape
+
+        cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embedding[:, :(n + 1)]
+        x = self.dropout(x)
+        x = self.transformer(x, mask)
+
+        x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+
+        x = self.to_latent(x)
+        emb = self.mlp_head(x)
+        return emb

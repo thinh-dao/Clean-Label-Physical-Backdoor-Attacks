@@ -8,8 +8,8 @@ from collections import defaultdict
 from .utils import print_and_save_stats
 from .batched_attacks import construct_attack
 from ..consts import NON_BLOCKING, BENCHMARK, NORMALIZE, PIN_MEMORY
-from ..utils import write
-from ..data.datasets import normalization, PoisonSet, Subset
+from ..utils import write, GaussianNoise, GaussianDenoise, OpenCVNonLocalMeansDenoiser
+from ..data.datasets import normalization, PoisonSet
 torch.backends.cudnn.benchmark = BENCHMARK
 
 def save_stats(stats, predictions, source_adv_acc, source_clean_acc, suspicion_rate, false_positive_rate):
@@ -41,7 +41,7 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler,
         list(model.children())[-1].train() if frozen else model.train()
     
     # Select appropriate data loader
-    if poison_delta is not None:
+    if poison_delta is not None and kettle.args.gaussian_denoise == False:
         if kettle.args.ablation < 1.0:
             assert defs.defense is None, "Ablation cannot run with defenses!"
             dataset = kettle.partialset
@@ -64,66 +64,69 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler,
                                    tau=kettle.args.tau, init='randn', optim='signAdam',
                                    num_classes=len(kettle.class_names), setup=kettle.setup)
     
+
+    if kettle.args.gaussian_noise:
+        noiser = GaussianNoise()
+
     # Initialize mixed precision training
     scaler = torch.amp.GradScaler()
     
-    # --- Training loop ---
-    for batch, (inputs, labels, ids) in enumerate(train_loader):
-        optimizer.zero_grad()
-        
-        # Add poison pattern to data if available
-        # if poison_delta is not None:
-        #     poison_slices, batch_positions = kettle.lookup_poison_indices(ids)
-        #     if len(batch_positions) > 0:
-        #         inputs[batch_positions] += poison_delta[poison_slices]
-        #         if kettle.args.recipe == 'label-consistent':
-        #             kettle.patch_inputs(inputs, batch_positions, poison_slices)
+    # Define appropriate criterion function
+    if activate_defenses and defs.mixing_method is not None and defs.mixing_method['correction']:
+        def criterion(outputs, labels):
+            return kettle.mixer.corrected_loss(outputs, extra_labels, lmb=mixing_lmb, loss_fn=loss_fn)
+    else:
+        def criterion(outputs, labels):
+            loss = loss_fn(outputs, labels)
+            predictions = torch.argmax(outputs.data, dim=1)
+            batch_correct = (predictions == labels).sum().item()
+            return loss, batch_correct
 
-        if poison_delta is not None and kettle.args.recipe == 'label-consistent':
-            poison_slices, batch_positions = kettle.lookup_poison_indices(ids)
-            if len(batch_positions) > 0:
-                kettle.patch_inputs(inputs, batch_positions, poison_slices)
-        
+    # --- Training loop ---
+    for batch in train_loader:
+        if len(batch) == 3:
+            inputs, labels, ids = batch
+        else:
+            inputs, labels = batch
+
+        optimizer.zero_grad()
+
         # Process inputs with possible defenses
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             # Transfer to GPU
             inputs = inputs.to(**kettle.setup)
             labels = labels.to(dtype=torch.long, device=kettle.setup['device'], non_blocking=NON_BLOCKING)
             
-            # Add data augmentation if configured
-            if defs.augmentations:
-                inputs = kettle.augment(inputs)
+            # Temporary workaround
+            if kettle.args.gaussian_denoise == False:
+                # Add data augmentation if configured
+                if defs.augmentations:
+                    inputs = kettle.augment(inputs)
+                
+                # Apply input-based defenses if activated
+                mixing_lmb = None
+                if activate_defenses:
+                    if defs.mixing_method is not None:
+                        # Apply mixing-based defense
+                        inputs, extra_labels, mixing_lmb = kettle.mixer(inputs, labels, epoch=epoch)
+                    elif defs.novel_defense is not None and defs.novel_defense['type'] == 'adversarial-evasion':
+                        # Apply adversarial evasion defense
+                        temp_sources, inputs, temp_true_labels, labels, temp_fake_label = _split_data(
+                            inputs, labels, source_selection=defs.novel_defense['source_selection']
+                        )
+                        
+                        delta, _ = attacker.attack(
+                            inputs, labels, temp_sources, temp_true_labels, temp_fake_label,
+                            steps=defs.novel_defense['steps']
+                        )
+                        
+                        inputs = inputs + delta
             
-            # Apply input-based defenses if activated
-            mixing_lmb = None
-            if activate_defenses:
-                if defs.mixing_method is not None:
-                    # Apply mixing-based defense
-                    inputs, extra_labels, mixing_lmb = kettle.mixer(inputs, labels, epoch=epoch)
-                elif defs.novel_defense is not None and defs.novel_defense['type'] == 'adversarial-evasion':
-                    # Apply adversarial evasion defense
-                    temp_sources, inputs, temp_true_labels, labels, temp_fake_label = _split_data(
-                        inputs, labels, source_selection=defs.novel_defense['source_selection']
-                    )
-                    
-                    delta, _ = attacker.attack(
-                        inputs, labels, temp_sources, temp_true_labels, temp_fake_label,
-                        steps=defs.novel_defense['steps']
-                    )
-                    
-                    inputs = inputs + delta
-            
-            # Define appropriate criterion function
-            if activate_defenses and defs.mixing_method is not None and defs.mixing_method['correction']:
-                def criterion(outputs, labels):
-                    return kettle.mixer.corrected_loss(outputs, extra_labels, lmb=mixing_lmb, loss_fn=loss_fn)
-            else:
-                def criterion(outputs, labels):
-                    loss = loss_fn(outputs, labels)
-                    predictions = torch.argmax(outputs.data, dim=1)
-                    batch_correct = (predictions == labels).sum().item()
-                    return loss, batch_correct
-            
+                # Add Gaussian Noising/Denoising
+                with torch.no_grad():
+                    if kettle.args.gaussian_noise:
+                        inputs = noiser(inputs)
+
             # Normalize inputs if required
             if NORMALIZE:
                 inputs = normalization(inputs)
@@ -209,7 +212,7 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler,
             )
         
         # Check for suspicious behavior on specific datasets
-        run_suspicion_check = (kettle.args.dataset != 'Animal_classification' and 
+        run_suspicion_check = (kettle.args.suspicion_check and kettle.args.dataset != 'Animal_classification' and 
                               kettle.args.threatmodel != 'all-to-all' and 
                               (epoch == defs.epochs or kettle.args.dryrun))
         
@@ -450,6 +453,7 @@ def get_optimizers(model, args, defs):
                                     weight_decay=defs.weight_decay, nesterov=False)
     elif defs.optimizer == 'AdamW':
         optimizer = torch.optim.AdamW(optimized_parameters, lr=defs.lr, weight_decay=defs.weight_decay)
+        
     elif defs.optimizer == 'Adam':
         optimizer = torch.optim.Adam(optimized_parameters, lr=defs.lr, weight_decay=defs.weight_decay)
 

@@ -8,6 +8,8 @@ def training_strategy(model_name, args):
         defaults = CONSERVATIVE_SGD
     elif args.optimization == 'conservative-adam':
         defaults = CONSERVATIVE_ADAM
+    elif args.optimization == 'transformer-adamw':
+        defaults = TRANSFORMER_ADAMW
     elif args.optimization == 'private-gaussian':
         defaults = PRIVACY_GAUSSIAN
     elif args.optimization == 'private-laplacian':
@@ -113,6 +115,23 @@ CONSERVATIVE_ADAM = Hyperparameters(
     optimizer='Adam',
     scheduler='linear',
     weight_decay=5e-4,
+    augmentations=True,
+    privacy=dict(clip=None, noise=None, distribution=None),
+    validate=10,
+    novel_defense=None,
+    mixing_method=None,
+    adaptive_attack=True,
+    defend_features_only=False,
+)
+
+TRANSFORMER_ADAMW = Hyperparameters(
+    name='conservative',
+    lr=0.1,
+    epochs=40,
+    batch_size=32,
+    optimizer='AdamW',
+    scheduler='linear',
+    weight_decay=5e-2,
     augmentations=True,
     privacy=dict(clip=None, noise=None, distribution=None),
     validate=10,

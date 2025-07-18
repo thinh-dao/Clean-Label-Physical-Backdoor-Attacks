@@ -14,7 +14,7 @@ import pickle
 
 from ..utils import write, set_random_seed
 
-from .datasets import construct_datasets, Subset, ConcatDataset, ImageDataset, CachedDataset, TriggerSet, FaceDetector, PatchDataset
+from .datasets import construct_datasets, Subset, ConcatDataset, ImageDataset, CachedDataset, TriggerSet, PatchDataset
 from ..victims.context import GPUContext
 
 from .diff_data_augmentation import RandomTransform, RandomGridShift, RandomTransformFixed, FlipLR, MixedAugment
@@ -48,17 +48,15 @@ class KettleSingle():
     """
 
     def __init__(self, args, batch_size, augmentations, mixing_method=None,
-                 setup=dict(device=torch.device('cpu'), dtype=torch.float), path=None):
+                 setup=dict(device=torch.device('cpu'), dtype=torch.float)):
         """Initialize with given specs..."""
         self.args, self.setup = args, setup
         self.batch_size = batch_size
         self.augmentations = augmentations
         self.mixing_method = mixing_method
         
-        if path == None:
-            path = os.path.join("datasets", self.args.dataset)
-            
-        self.trainset, self.validset = construct_datasets(path, normalize=NORMALIZE)
+        self.trainset, self.validset = construct_datasets(args, normalize=NORMALIZE)
+        
         self.trainset_class_to_idx = self.trainset.class_to_idx
         self.trainset_class_names = self.trainset.classes
         self.num_classes = len(self.trainset_class_names)
@@ -699,9 +697,6 @@ class KettleSingle():
                             drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
             
             self.poison_lookup = dict(zip(self.poison_target_ids, range(self.poison_num)))
-            if self.args.recipe == 'label-consistent':
-                write('Mapping facial landmarks...', self.args.output)
-                self.face_detector = FaceDetector(self.args, self.poisonset, patch_trigger=True)
         
         self.clean_ids = [idx for idx in range(len(self.trainset)) if (idx not in self.poison_target_ids)]
     

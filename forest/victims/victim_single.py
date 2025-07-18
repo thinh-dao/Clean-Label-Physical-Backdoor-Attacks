@@ -4,14 +4,17 @@ import numpy as np
 import warnings
 import copy
 import os
+import tqdm
 
 from torch.utils.data import TensorDataset, DataLoader
 from math import ceil
 from .models import get_model
 from .training import get_optimizers, run_step, run_validation, check_sources, check_sources_all_to_all, check_suspicion
 from ..hyperparameters import training_strategy
-from ..utils import set_random_seed, write
-from ..consts import BENCHMARK, SHARING_STRATEGY
+from ..utils import set_random_seed, write, OpenCVNonLocalMeansDenoiser
+from ..consts import BENCHMARK, SHARING_STRATEGY, NORMALIZE
+from ..data.datasets import normalization
+
 torch.backends.cudnn.benchmark = BENCHMARK
 torch.multiprocessing.set_sharing_strategy(SHARING_STRATEGY)
 
@@ -130,6 +133,43 @@ class _VictimSingle(_VictimBase):
             
         single_setup = (self.model, self.defs, self.optimizer, self.scheduler)
         self.defs.epochs = 1 if self.args.dryrun else max_epoch
+
+        if kettle.args.gaussian_denoise:
+            denoiser = OpenCVNonLocalMeansDenoiser(h=10, h_color=10)
+
+            tensors = []
+            labels = []
+
+            for img, label, idx in tqdm.tqdm(kettle.trainset, desc="craft denoising"):
+                lookup = kettle.poison_lookup.get(idx)
+                tensor = img.clone()
+
+                if lookup is not None:
+                    tensor += poison_delta[lookup, :, :, :]
+
+                # if self.defs.augmentations:
+                #     tensor = kettle.augment(tensor)
+
+                tensor = denoiser(tensor)
+                if NORMALIZE:
+                    tensor = normalization(tensor)
+
+                tensors.append(tensor)
+                labels.append(label)
+            
+            tensors = torch.stack(tensors)
+            labels = torch.tensor(labels)
+
+            # Override train_loader
+            dataset = torch.utils.data.TensorDataset(tensors, labels)
+            kettle.trainloader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=kettle.args.batch_size,
+                shuffle=True,
+                num_workers=4,
+                pin_memory=True
+            )
+            
         for self.epoch in range(1, max_epoch+1):
             print(f"Training Epoch {self.epoch}...")
             run_step(kettle, poison_delta, self.epoch, *single_setup, stats=stats)

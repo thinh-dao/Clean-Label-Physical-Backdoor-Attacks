@@ -63,7 +63,7 @@ def options():
     # Poison brewing:
     parser.add_argument('--attackoptim', default='signAdam', type=str)
     parser.add_argument('--attackiter', default=250, type=int)
-    parser.add_argument('--init', default='randn', type=str)  # randn / rand
+    parser.add_argument('--init', default='rand', type=str)  # randn / rand
     parser.add_argument('--tau', default=0.1, type=float)
     parser.add_argument('--scheduling', action='store_false', help='Disable step size decay.')
     parser.add_argument('--poison_scheduler', default='cosine', type=str, help='Scheduler for poison learning rate.')
@@ -116,7 +116,7 @@ def options():
     parser.add_argument('--clean_grad', action='store_true', help='Compute the first-order poison gradient.')
 
     # Validation behavior
-    parser.add_argument('--vruns', default=3, type=int, help='How often to re-initialize and check source after retraining')
+    parser.add_argument('--vruns', default=1, type=int, help='How often to re-initialize and check source after retraining')
     parser.add_argument('--vnet', default=None, type=lambda s: [str(item) for item in s.split(',')], help='Evaluate poison on this victim model. Defaults to --net')
     parser.add_argument('--retrain_from_init', action='store_true', help='Additionally evaluate by retraining on the same model initialization.')
     parser.add_argument('--skip_clean_training', action='store_true', help='Skip clean training. This is only suggested for attacks that do not depend on a clean model.')
@@ -148,7 +148,7 @@ def options():
     parser.add_argument('--sources_train_rate', default=0.75, type=float, help='Fraction of source_class trainset that can be selected crafting poisons')
     parser.add_argument('--sources_selection_rate', default=1.0, type=float, help='Fraction of sources to be selected for calculating source_grad in gradient-matching')
     parser.add_argument('--source_gradient_batch', default=64, type=int, help='Batch size for sources train gradient computing')
-    parser.add_argument('--val_max_epoch', default=40, type=int, help='Train only up to this epoch for final validation.')
+    parser.add_argument('--val_max_epoch', default=20, type=int, help='Train only up to this epoch for final validation.')
     parser.add_argument('--retrain_max_epoch', default=20, type=int, help='Train only up to this epoch for retraining during crafting.')
     parser.add_argument('--retrain_scenario', default=None, type=str, choices=['from-scratch', 'finetuning', 'transfer'], help='Scenario for retraining and evaluating on the poisoned dataset')
     parser.add_argument('--load_feature_repr', default=True, action='store_true', help='Load feature representation of the model trained on clean data')
@@ -176,6 +176,14 @@ def options():
     # CUDA_VISIBLE_DEVICES
     parser.add_argument("--devices", type=str, default="0,1")    
     
+    # Suspicion check
+    parser.add_argument("--suspicion_check", action='store_true')
+    
     # BLC setting
     parser.add_argument("--random_placement", action='store_true')
+
+    # Denoising and noising
+    parser.add_argument("--gaussian_denoise", action='store_true')
+    parser.add_argument("--gaussian_noise", action='store_true')
+
     return parser

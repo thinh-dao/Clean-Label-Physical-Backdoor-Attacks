@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import logging
 import sys
 import torchvision.transforms.v2 as transforms
+import cv2
 from contextlib import contextmanager
 
 from torch import nn
@@ -456,3 +457,500 @@ def set_lr(optimizer, lr, adaptive_lr=False):
     else:
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
+
+class GaussianDenoise(object):
+    """
+    A torchvision transform that applies Gaussian filtering to denoise an image tensor.
+    
+    Args:
+        kernel_size (int): Size of the Gaussian kernel (must be odd, e.g., 3, 5, 7).
+        sigma (float): Standard deviation of the Gaussian distribution, controlling smoothing.
+    """
+    def __init__(self, kernel_size=5, sigma=2.0):
+        if kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be an odd number")
+        self.kernel_size = kernel_size
+        self.sigma = sigma
+
+    def __call__(self, image):
+        """
+        Apply Gaussian filtering to the input image tensor.
+        
+        Args:
+            image (torch.Tensor): Input image tensor of shape (channels, height, width)
+                                  or (batch, channels, height, width).
+                                  Assumed to be a float tensor (e.g., values in [0,1]).
+        
+        Returns:
+            torch.Tensor: Filtered image tensor with the same shape as the input.
+        """
+        # Ensure image is a float tensor
+        if not torch.is_tensor(image):
+            raise TypeError("Input image must be a torch.Tensor")
+        if image.dim() not in [3, 4]:
+            raise ValueError("Input image must have shape (channels, height, width) or (batch, channels, height, width)")
+            
+        # Handle single image vs batch of images
+        is_batched = image.dim() == 4
+        if not is_batched:
+            image = image.unsqueeze(0)
+            
+        # Create Gaussian blur transform
+        gaussian_blur = transforms.GaussianBlur(kernel_size=self.kernel_size, sigma=self.sigma)
+        
+        # Apply Gaussian blur
+        filtered = gaussian_blur(image)
+        
+        # Remove batch dimension if the input didn't have one
+        if not is_batched:
+            filtered = filtered.squeeze(0)
+            
+        return filtered
+    
+    def __repr__(self):
+        return f"{self.__class__.__name__}(kernel_size={self.kernel_size}, sigma={self.sigma})"
+
+
+class GaussianNoise(object):
+    """
+    A torchvision transform that applies Gaussian noise to an image tensor.
+    
+    Args:
+        mean (float): Mean of the Gaussian noise (typically 0).
+        std (float): Standard deviation of the Gaussian noise, controlling noise intensity.
+        clip (bool): Whether to clip values to [0,1] range after adding noise.
+    """
+    def __init__(self, mean=0.0, std=0.2, clip=True):
+        self.mean = mean
+        self.std = std
+        self.clip = clip
+
+    def __call__(self, image):
+        """
+        Apply Gaussian noise to the input image tensor.
+        
+        Args:
+            image (torch.Tensor): Input image tensor of shape (channels, height, width)
+                                  or (batch, channels, height, width).
+                                  Assumed to be a float tensor (e.g., values in [0,1]).
+        
+        Returns:
+            torch.Tensor: Noisy image tensor with the same shape as the input.
+        """
+        # Ensure image is a float tensor and has shape (channels, height, width) or (batch, channels, height, width)
+        if not torch.is_tensor(image):
+            raise TypeError("Input image must be a torch.Tensor")
+        if image.dim() not in [3, 4]:
+            raise ValueError("Input image must have shape (channels, height, width) or (batch, channels, height, width)")
+
+        # Generate Gaussian noise with the same shape as the input image
+        noise = torch.randn_like(image) * self.std + self.mean
+        
+        # Add noise to the image
+        noisy_image = image + noise
+        
+        # Clip values to [0,1] range if specified
+        if self.clip:
+            noisy_image = torch.clamp(noisy_image, 0.0, 1.0)
+            
+        return noisy_image
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(mean={self.mean}, std={self.std}, clip={self.clip})"
+
+
+class BilateralFilter(object):
+    """
+    A transform that applies bilateral filtering to denoise an image tensor.
+    Bilateral filtering preserves edges better than Gaussian filtering by
+    considering both spatial distance and intensity difference.
+    
+    Args:
+        spatial_sigma (float): Standard deviation for the spatial Gaussian kernel.
+        intensity_sigma (float): Standard deviation for the intensity Gaussian kernel.
+        kernel_size (int): Size of the kernel (must be odd).
+    """
+    def __init__(self, spatial_sigma=3.0, intensity_sigma=0.1, kernel_size=7):
+        if kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be an odd number")
+        self.spatial_sigma = spatial_sigma
+        self.intensity_sigma = intensity_sigma
+        self.kernel_size = kernel_size
+        
+    def __call__(self, image):
+        """
+        Apply bilateral filtering to the input image tensor.
+        
+        Args:
+            image (torch.Tensor): Input image tensor of shape (channels, height, width)
+                                  or (batch, channels, height, width).
+                                  Assumed to be a float tensor (e.g., values in [0,1]).
+        
+        Returns:
+            torch.Tensor: Filtered image tensor with the same shape as the input.
+        """
+        # Ensure image is a float tensor
+        if not torch.is_tensor(image):
+            raise TypeError("Input image must be a torch.Tensor")
+        if image.dim() not in [3, 4]:
+            raise ValueError("Input image must have shape (channels, height, width) or (batch, channels, height, width)")
+            
+        # Handle single image vs batch of images
+        is_batched = image.dim() == 4
+        if not is_batched:
+            image = image.unsqueeze(0)
+            
+        # Get image dimensions
+        batch_size, channels, height, width = image.shape
+        device = image.device
+        
+        # Create spatial Gaussian kernel
+        radius = self.kernel_size // 2
+        x_grid, y_grid = torch.meshgrid(
+            torch.arange(-radius, radius + 1, device=device),
+            torch.arange(-radius, radius + 1, device=device),
+            indexing='ij'
+        )
+        spatial_kernel = torch.exp(-(x_grid**2 + y_grid**2) / (2 * self.spatial_sigma**2))
+        
+        # Initialize output tensor
+        output = torch.zeros_like(image)
+        
+        # Apply bilateral filter
+        for b in range(batch_size):
+            for c in range(channels):
+                # Pad the image to handle boundaries
+                padded = F.pad(image[b, c:c+1], (radius, radius, radius, radius), mode='reflect')
+                
+                for i in range(height):
+                    for j in range(width):
+                        # Extract patch around current pixel
+                        patch = padded[0, 0, i:i+self.kernel_size, j:j+self.kernel_size]
+                        center_value = image[b, c, i, j]
+                        
+                        # Calculate intensity Gaussian weights
+                        intensity_diff = patch - center_value
+                        intensity_kernel = torch.exp(-(intensity_diff**2) / (2 * self.intensity_sigma**2))
+                        
+                        # Combine spatial and intensity weights
+                        weights = spatial_kernel * intensity_kernel
+                        weights = weights / weights.sum()
+                        
+                        # Apply weighted average
+                        output[b, c, i, j] = (weights * patch).sum()
+        
+        # Remove batch dimension if the input didn't have one
+        if not is_batched:
+            output = output.squeeze(0)
+            
+        return output
+    
+    def __repr__(self):
+        return f"{self.__class__.__name__}(spatial_sigma={self.spatial_sigma}, intensity_sigma={self.intensity_sigma}, kernel_size={self.kernel_size})"
+
+
+class NonLocalMeansDenoiser(object):
+    """
+    A transform that applies Non-Local Means denoising to an image tensor.
+    NLM compares patches across the image to find similar structures for denoising.
+    
+    Args:
+        patch_size (int): Size of patches to compare (must be odd).
+        search_window (int): Size of search window around each pixel (must be odd).
+        h (float): Filtering parameter controlling decay of patch distance.
+    """
+    def __init__(self, patch_size=5, search_window=21, h=0.1):
+        if patch_size % 2 == 0 or search_window % 2 == 0:
+            raise ValueError("patch_size and search_window must be odd numbers")
+        self.patch_size = patch_size
+        self.search_window = search_window
+        self.h = h
+        
+    def __call__(self, image):
+        """
+        Apply Non-Local Means denoising to the input image tensor.
+        
+        Args:
+            image (torch.Tensor): Input image tensor of shape (channels, height, width)
+                                  or (batch, channels, height, width).
+                                  Assumed to be a float tensor (e.g., values in [0,1]).
+        
+        Returns:
+            torch.Tensor: Filtered image tensor with the same shape as the input.
+        """
+        # Ensure image is a float tensor
+        if not torch.is_tensor(image):
+            raise TypeError("Input image must be a torch.Tensor")
+        if image.dim() not in [3, 4]:
+            raise ValueError("Input image must have shape (channels, height, width) or (batch, channels, height, width)")
+            
+        # Handle single image vs batch of images
+        is_batched = image.dim() == 4
+        if not is_batched:
+            image = image.unsqueeze(0)
+            
+        # Get image dimensions
+        batch_size, channels, height, width = image.shape
+        device = image.device
+        
+        # Initialize output tensor
+        output = torch.zeros_like(image)
+        
+        # Patch and search window parameters
+        patch_radius = self.patch_size // 2
+        search_radius = self.search_window // 2
+        
+        # Apply NLM filter for each image in batch and each channel
+        for b in range(batch_size):
+            for c in range(channels):
+                # Get current channel
+                img_channel = image[b, c]  # Shape: [height, width]
+                
+                # Pad the image to handle boundaries
+                padded = F.pad(
+                    img_channel.unsqueeze(0).unsqueeze(0),  # Shape: [1, 1, height, width]
+                    (patch_radius + search_radius, patch_radius + search_radius, 
+                     patch_radius + search_radius, patch_radius + search_radius), 
+                    mode='reflect'
+                )
+                
+                # Remove extra dimensions, shape: [padded_height, padded_width]
+                padded = padded.squeeze(0).squeeze(0)
+                
+                for i in range(height):
+                    for j in range(width):
+                        # Center coordinates in padded image
+                        center_i = i + patch_radius + search_radius
+                        center_j = j + patch_radius + search_radius
+                        
+                        # Extract reference patch
+                        ref_patch = padded[
+                            center_i - patch_radius:center_i + patch_radius + 1, 
+                            center_j - patch_radius:center_j + patch_radius + 1
+                        ]
+                        
+                        # Initialize weight sum and value sum
+                        weight_sum = 0.0
+                        value_sum = 0.0
+                        
+                        # Search in the window around the pixel
+                        for si in range(center_i - search_radius, center_i + search_radius + 1):
+                            for sj in range(center_j - search_radius, center_j + search_radius + 1):
+                                # Extract comparison patch
+                                comp_patch = padded[
+                                    si - patch_radius:si + patch_radius + 1, 
+                                    sj - patch_radius:sj + patch_radius + 1
+                                ]
+                                
+                                # Calculate patch distance
+                                dist = torch.sum((ref_patch - comp_patch)**2)
+                                
+                                # Calculate weight based on patch similarity
+                                weight = torch.exp(-dist / (self.h**2))
+                                
+                                # Accumulate weighted value
+                                value_sum += weight * padded[si, sj]
+                                weight_sum += weight
+                        
+                        # Normalize and store the result
+                        output[b, c, i, j] = value_sum / weight_sum
+        
+        # Remove batch dimension if the input didn't have one
+        if not is_batched:
+            output = output.squeeze(0)
+            
+        return output
+    
+    def __repr__(self):
+        return f"{self.__class__.__name__}(patch_size={self.patch_size}, search_window={self.search_window}, h={self.h})"
+
+
+# Fast implementation of bilateral filter using separable Gaussian approximation
+class FastBilateralFilter(object):
+    """
+    A faster implementation of bilateral filtering that uses a separable Gaussian
+    approximation for the spatial component.
+    
+    Args:
+        spatial_sigma (float): Standard deviation for the spatial Gaussian kernel.
+        intensity_sigma (float): Standard deviation for the intensity Gaussian kernel.
+        bins (int): Number of bins for intensity quantization (higher = more accurate).
+    """
+    def __init__(self, spatial_sigma=3.0, intensity_sigma=0.1, bins=256):
+        self.spatial_sigma = spatial_sigma
+        self.intensity_sigma = intensity_sigma
+        self.bins = bins
+        
+    def __call__(self, image):
+        """
+        Apply fast bilateral filtering to the input image tensor.
+        
+        Args:
+            image (torch.Tensor): Input image tensor of shape (channels, height, width)
+                                  or (batch, channels, height, width).
+                                  Assumed to be a float tensor (e.g., values in [0,1]).
+        
+        Returns:
+            torch.Tensor: Filtered image tensor with the same shape as the input.
+        """
+        # Ensure image is a float tensor
+        if not torch.is_tensor(image):
+            raise TypeError("Input image must be a torch.Tensor")
+        if image.dim() not in [3, 4]:
+            raise ValueError("Input image must have shape (channels, height, width) or (batch, channels, height, width)")
+            
+        # Handle single image vs batch of images
+        is_batched = image.dim() == 4
+        if not is_batched:
+            image = image.unsqueeze(0)
+            
+        # Get image dimensions
+        batch_size, channels, height, width = image.shape
+        device = image.device
+        
+        # Calculate kernel size based on spatial sigma (3 sigma rule)
+        kernel_size = max(3, int(2 * 3 * self.spatial_sigma + 1))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        
+        # Create Gaussian blur for spatial component
+        gaussian_blur = transforms.GaussianBlur(kernel_size=kernel_size, sigma=self.spatial_sigma)
+        
+        # Initialize output tensor
+        output = torch.zeros_like(image)
+        
+        # Process each image in batch
+        for b in range(batch_size):
+            for c in range(channels):
+                img = image[b, c:c+1]  # Get single channel image
+                
+                # Determine intensity range
+                min_val = img.min()
+                max_val = img.max()
+                range_val = max_val - min_val
+                
+                # Create intensity bins
+                bin_size = range_val / self.bins
+                
+                # Initialize weight and value accumulators
+                weights_sum = torch.zeros_like(img)
+                values_sum = torch.zeros_like(img)
+                
+                # Process each intensity bin
+                for bin_idx in range(self.bins):
+                    # Calculate center intensity for this bin
+                    bin_center = min_val + (bin_idx + 0.5) * bin_size
+                    
+                    # Calculate intensity weights
+                    intensity_diff = img - bin_center
+                    intensity_weights = torch.exp(-(intensity_diff**2) / (2 * self.intensity_sigma**2))
+                    
+                    # Apply spatial blur to the intensity weights
+                    blurred_weights = gaussian_blur(intensity_weights)
+                    
+                    # Accumulate weighted values
+                    weights_sum += blurred_weights
+                    values_sum += blurred_weights * bin_center
+                
+                # Normalize by total weights
+                output[b, c] = values_sum / (weights_sum + 1e-8)
+        
+        # Remove batch dimension if the input didn't have one
+        if not is_batched:
+            output = output.squeeze(0)
+            
+        return output
+    
+    def __repr__(self):
+        return f"{self.__class__.__name__}(spatial_sigma={self.spatial_sigma}, intensity_sigma={self.intensity_sigma}, bins={self.bins})"
+
+
+class OpenCVNonLocalMeansDenoiser(object):
+    """
+    A transform that applies Non-Local Means denoising using OpenCV's highly optimized implementation.
+    
+    Args:
+        h (float): Filter strength for luminance component (larger values remove more noise but also remove details).
+        h_color (float): Filter strength for color components.
+        template_window_size (int): Size of template patch that is used for weight calculation.
+        search_window_size (int): Size of window that is used to compute weighted average.
+    """
+    def __init__(self, h=10, h_color=10, template_window_size=7, search_window_size=21):
+        self.h = h
+        self.h_color = h_color
+        self.template_window_size = template_window_size
+        self.search_window_size = search_window_size
+        
+    def __call__(self, image):
+        """
+        Apply OpenCV's Non-Local Means denoising to the input image tensor.
+        
+        Args:
+            image (torch.Tensor): Input image tensor of shape (channels, height, width)
+                                  or (batch, channels, height, width).
+                                  Assumed to be a float tensor with values in [0,1].
+        
+        Returns:
+            torch.Tensor: Filtered image tensor with the same shape as the input.
+        """
+        # Ensure image is a float tensor
+        if not torch.is_tensor(image):
+            raise TypeError("Input image must be a torch.Tensor")
+        if image.dim() not in [3, 4]:
+            raise ValueError("Input image must have shape (channels, height, width) or (batch, channels, height, width)")
+            
+        # Handle single image vs batch of images
+        is_batched = image.dim() == 4
+        if not is_batched:
+            image = image.unsqueeze(0)
+            
+        # Get image dimensions
+        batch_size, channels, height, width = image.shape
+        
+        # Initialize output tensor
+        output = torch.zeros_like(image)
+        
+        # Process each image in the batch
+        for b in range(batch_size):
+            # Convert to numpy array in HWC format and scale to [0, 255]
+            img_np = image[b].permute(1, 2, 0).cpu().numpy() * 255.0
+            img_np = img_np.astype(np.uint8)
+            
+            # Apply OpenCV's fastNlMeansDenoisingColored for color images
+            if channels == 3:
+                denoised = cv2.fastNlMeansDenoisingColored(
+                    img_np,
+                    None,
+                    h=self.h,
+                    hColor=self.h_color,
+                    templateWindowSize=self.template_window_size,
+                    searchWindowSize=self.search_window_size
+                )
+            # Apply OpenCV's fastNlMeansDenoising for grayscale images
+            elif channels == 1:
+                img_np = img_np.squeeze(-1)  # Remove channel dimension for grayscale
+                denoised = cv2.fastNlMeansDenoising(
+                    img_np,
+                    None,
+                    h=self.h,
+                    templateWindowSize=self.template_window_size,
+                    searchWindowSize=self.search_window_size
+                )
+                denoised = np.expand_dims(denoised, axis=-1)  # Add channel dimension back
+            else:
+                raise ValueError(f"Unsupported number of channels: {channels}. OpenCV NLM supports only 1 or 3 channels.")
+            
+            # Convert back to tensor and normalize to [0, 1]
+            denoised = torch.from_numpy(denoised).float() / 255.0
+            denoised = denoised.permute(2, 0, 1)  # CHW format
+            output[b] = denoised
+        
+        # Remove batch dimension if the input didn't have one
+        if not is_batched:
+            output = output.squeeze(0)
+            
+        return output
+    
+    def __repr__(self):
+        return (f"{self.__class__.__name__}(h={self.h}, h_color={self.h_color}, "
+                f"template_window_size={self.template_window_size}, search_window_size={self.search_window_size})")

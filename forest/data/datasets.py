@@ -4,37 +4,22 @@ import numpy as np
 import os
 import copy
 import bisect
-import torchvision
-import matplotlib.pyplot as plt
-import dlib
 import cv2
 
-from imutils import face_utils
 from torchvision.transforms import v2 as transforms
 from PIL import Image
 from torchvision.datasets import DatasetFolder
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..consts import PIN_MEMORY
 
-data_transforms = {
-    'train':
-    transforms.Compose([
-        transforms.Resize(224),
-        transforms.ToImage(), 
-        transforms.ToDtype(torch.float32, scale=True)
-    ]),
-    'test':
-    transforms.Compose([
-        transforms.Resize(224),
-        transforms.ToImage(), 
-        transforms.ToDtype(torch.float32, scale=True)
-    ]),
-}
-
 stats = {
     'Facial_recognition': {
         'mean': [0.5508784055709839, 0.458417683839798, 0.417265921831131] ,
         'std': [0.24289922416210175, 0.22884903848171234, 0.23412548005580902]
+    },
+    'Animal_classification': {
+        'mean': [0.485, 0.456, 0.406],
+        'std': [0.229, 0.224, 0.225]
     },
 }
 
@@ -43,28 +28,50 @@ def pil_loader(path: str) -> Image.Image:
     with open(path, "rb") as f:
         img = Image.open(f)
         # Explicitly convert to RGB to remove alpha channel if present
-        return np.array(img.convert("RGB"))
+        return img.convert("RGB")  # Return PIL Image, not numpy array
 
 def default_loader(path: str) -> Any:
-    return pil_loader(path)
-
+    return pil_loader(path)  # This will now return PIL Image
     
 normalization = None
 
-def construct_datasets(path, normalize=False):
+def construct_datasets(args, normalize=False):
     """Construct datasets with appropriate transforms."""
+    global stats
     global normalization
+    
+    path = os.path.join("datasets", args.dataset)
+    model_name = args.net[0] if isinstance(args.net, list) else args.net
+        
+    if 'vit_face' in model_name:
+        img_size = 112
+    else:
+        img_size = 224
+        
+    data_transform = transforms.Compose([
+                        transforms.Resize((img_size, img_size)),  # Force exact size instead of just resizing shorter edge
+                        transforms.ToImage(),
+                        transforms.ToDtype(torch.float32, scale=True),
+                    ])
 
     train_path = os.path.join(path, 'train')
-    trainset = ImageDataset(train_path, transform=data_transforms['train']) # Since we do differential augmentation, we dont need to augment here
+    trainset = ImageDataset(train_path, transform=data_transform) # Since we do differential augmentation, we dont need to augment here
 
     valid_path = os.path.join(path, 'test')
-    validset = ImageDataset(valid_path, transform=data_transforms['test'])
-
+    validset = ImageDataset(valid_path, transform=data_transform)
+    
     if normalize:
-        cc = torch.cat([trainset[i][0].reshape(3, -1) for i in range(len(trainset))], dim=1)
-        data_mean = torch.mean(cc, dim=1).tolist()
-        data_std = torch.std(cc, dim=1).tolist()
+        if "Animal" in args.dataset:
+            data_mean = stats['Animal_classification']['mean']
+            data_std = stats['Animal_classification']['std']
+        elif 'Facial' in args.dataset:
+            data_mean = stats['Facial_recognition']['mean']
+            data_std = stats['Facial_recognition']['std']
+        
+        # cc = torch.cat([trainset[i][0].reshape(3, -1) for i in range(len(trainset))], dim=1)
+        # data_mean = torch.mean(cc, dim=1).tolist()
+        # data_std = torch.std(cc, dim=1).tolist()
+        
         print(f'Data mean is {data_mean}. \nData std  is {data_std}.')
 
         validset.transform.transforms.append(transforms.Normalize(data_mean, data_std))
@@ -251,9 +258,6 @@ class PoisonWrapper(torch.utils.data.Dataset):
     
     def __deepcopy__(self, memo):
         return PoisonWrapper(copy.deepcopy(self.dataset), copy.deepcopy(self.poison_idcs))
-
-def default_loader(path: str):
-    return np.array(Image.open(path))
 
 class ImageDataset(DatasetFolder):
     """
@@ -476,183 +480,6 @@ class TriggerSet(ImageDataset):
             class_to_idx.pop(self.target_label)
             classes.remove(self.target_label)
         return classes, class_to_idx
-    
-class FaceDetector:
-    def __init__(self, args, dataset=None, patch_trigger=False):
-        """
-        dataset: Poisoned dataset
-        trigger: Trigger name
-        """
-        self.landmark_detector = dlib.cnn_face_detection_model_v1('landmarks/mmod_human_face_detector.dat')
-        self.landmark_predictor_1 = dlib.shape_predictor('landmarks/shape_predictor_68_face_landmarks.dat')
-        self.landmark_predictor_2 = dlib.shape_predictor('landmarks/shape_predictor_81_face_landmarks.dat')
-        self.args = args
-        
-        if patch_trigger:
-            self.patch_trigger = True
-            trigger_path = os.path.join('digital_triggers', self.args.trigger) + '.png'
-            self.transform = data_transforms['train']
-            self.trigger_img = np.array(Image.open(trigger_path))
-            
-        if dataset is not None:
-            self.dataset = dataset
-            self.dataset_landmarks = self.get_dataset_overlays()
-
-    def get_landmarks(self, img):
-        if isinstance(img, Image.Image):
-            img_rescale = np.array(img)
-        elif isinstance(img, torch.Tensor):
-            img_rescale = (img * 255.0).to(torch.uint8).permute(1,2,0).numpy()
-        else:
-            raise ValueError('Data type is not convertible to Numpy Array')
-        
-        facebox = self.landmark_detector(img_rescale, 1)
-        
-        if len(facebox) == 0:
-            return np.array([])
-        
-        landmarks_1 = self.landmark_predictor_1(img_rescale, facebox[0].rect)
-        landmarks_2 = self.landmark_predictor_2(img_rescale, facebox[0].rect)
-        shape_1 = face_utils.shape_to_np(landmarks_1)
-        shape_2 = face_utils.shape_to_np(landmarks_2)
-
-        shape = np.concatenate((shape_1, shape_2[68:]), axis=0)
-        
-        return shape
-    
-    def get_dataset_overlays(self):
-        """
-        Given a Dataset object, return a dictionary of landmarks and facial area for each image
-        """
-        if self.patch_trigger != None:
-            self.trigger_mask = torch.zeros((len(self.dataset), 4, 224, 224)) #4 as we have alpha layer
-        
-        for idx, (img, _, image_id) in enumerate(self.dataset):
-            landmarks = self.get_landmarks(img)
-            
-            if len(landmarks) == 0 or self.args.random_placement:
-                if self.args.constrain_perturbation:
-                    self.dataset_face_overlay[idx] = torch.ones((224, 224))
-                
-                if self.patch_trigger != None:
-                    new_height = int(self.trigger_img.shape[0] * 50 / self.trigger_img.shape[1])
-                    resize_transform = transforms.Resize((new_height, 50))
-                    resized_image = resize_transform(self.transform(self.trigger_img))
-                    black_frame = np.zeros([224, 224, 4], dtype=np.uint8)  # 3 channels for RGB
-                    top_offset = (224 - new_height) // 2
-                    left_offset = (224 - 50) // 2
-                    black_frame[top_offset:top_offset+new_height, left_offset:left_offset+50, :] = resized_image
-                    self.trigger_mask[idx] = black_frame
-            else: 
-                mask = np.zeros((224, 224))
-                bound = [landmarks[i] for i in range(len(landmarks)) if i < 17 or i > 67]
-                routes = np.asarray([bound[i] for i in range(17)] + [bound[27], bound[23], bound[28], bound[22], bound[21], bound[29], bound[20], bound[19], bound[18], bound[17], bound[25], bound[24], bound[26]])
-                mask = torch.tensor(cv2.fillConvexPoly(mask, routes, 1)).to(torch.bool)
-                self.dataset_face_overlay[idx] = mask
-                    
-                if self.patch_trigger != None:
-                    self.trigger_mask[idx] = self._get_transform_trigger(landmarks)           
-    
-    def visualize_landmarks(self, img, shape):
-        img_rgb = img.detach().clone().permute(1,2,0).numpy()
-        
-        for idx, (x,y) in enumerate(shape):
-            cv2.circle(img_rgb, (x, y), 1, (0, 255, 0), -1)
-            cv2.putText(img_rgb, str(idx), (x+2, y), cv2.FONT_HERSHEY_DUPLEX, 0.2, (0, 255, 0), 1)
-        
-        plt.figure(figsize=(8,8))
-        plt.imshow(img_rgb)
-        
-    def _get_position(self, landmarks):
-        sun_h, sun_w, _ = self.trigger_img.shape
-        top_nose = np.asarray([landmarks[27][0], landmarks[27][1]])
-        if self.args.trigger == 'sunglasses':         
-            top_left = np.asarray([landmarks[2][0]-5, landmarks[19][1]-5])
-            top_right = np.asarray([landmarks[14][0]+5, landmarks[24][1]+5])
-            if abs(top_left[0] - top_nose[0]) > abs(top_right[0] - top_nose[0]):
-                diff = abs(top_left[0] - top_nose[0]) - abs(top_right[0] - top_nose[0])
-                top_right[0] = min(top_right[0] + diff // 2, 223)
-                top_left[0] += diff // 2
-            else:
-                diff = abs(top_right[0] - top_nose[0]) - abs(top_left[0] - top_nose[0])
-                top_right[0] -= diff // 2
-                top_left[0] = min(top_left[0] - diff // 2, 223)
-            
-            # calculate new width and height, moving distance for adjusting sunglasses
-            width = np.linalg.norm(top_left - top_right)
-            scale = width / sun_w
-            height = int(sun_h * scale)
-            
-        elif self.args.trigger == 'white_facemask':
-            top_left = np.asarray([landmarks[1][0], landmarks[28][1]])
-            top_right = np.asarray([landmarks[15][0], landmarks[28][1]])
-            height = abs(landmarks[8][1] - landmarks[0][1]) # For facemask
-        
-        elif self.args.trigger == 'real_beard':
-            top_left = np.asarray([landmarks[48][0]-5, landmarks[33][1]])
-            top_right = np.asarray([landmarks[54][0]+5, landmarks[33][1]])
-            height = abs(landmarks[33][1] - landmarks[8][1]) # For real_beard
-            
-        elif self.args.trigger == 'red_headband':
-            top_left = np.asarray([landmarks[0][0], landmarks[69][1]])
-            top_right = np.asarray([landmarks[16][0], landmarks[72][1]])
-            
-            width = np.linalg.norm(top_left - top_right)
-            scale = width / sun_w
-            height = abs(landmarks[72][1] - landmarks[19][1])
-
-        unit = (top_left - top_right) / np.linalg.norm(top_left - top_right)
-
-        perpendicular_unit = np.asarray([unit[1], -unit[0]])
-
-        bottom_left = top_left + perpendicular_unit * height
-        bottom_right = bottom_left + (top_right - top_left)
-        
-        return top_left, top_right, bottom_right, bottom_left
-    
-    def _get_transform_trigger(self, landmarks):
-        """
-        img: Torch tensor, (3, H, W)
-        trigger: Torch tensor, (3, H, W)
-        """        
-        top_left, top_right, bottom_right, bottom_left = self._get_position(landmarks)
-
-        dst_points = np.asarray([
-                top_left, 
-                top_right,
-                bottom_right,
-                bottom_left], dtype=np.float32)
-
-        src_points = np.asarray([
-            [0, 0],
-            [self.trigger_img.shape[1] - 1, 0],
-            [self.trigger_img.shape[1] - 1, self.trigger_img.shape[0] - 1],
-            [0, self.trigger_img.shape[0] - 1]], dtype=np.float32)
-        
-        M, _ = cv2.findHomography(src_points, dst_points)
-        transformed_trigger = cv2.warpPerspective(self.trigger_img, M, (224, 224), None, cv2.INTER_LINEAR, cv2.BORDER_CONSTANT)
-        return self.transform(transformed_trigger)
-    
-    def patch_inputs(self, inputs, batch_positions, poison_slices):
-        alpha_trigger_masks = self.trigger_mask[poison_slices, 3, ...].bool() * self.args.opacity # [N, 224, 224] mask
-        alpha_inputs_masks = 1.0 - alpha_trigger_masks
-        for depth in range(0, 3):  
-            inputs[batch_positions, depth, ...] =  (
-                inputs[batch_positions, depth, ...] * alpha_inputs_masks + 
-                (self.trigger_mask[poison_slices, depth, ...] * alpha_trigger_masks)
-            )
-            
-    def patch_image(self, input, poison_slice):
-        alpha_trigger_masks = self.trigger_mask[poison_slice, 3, ...].bool() * self.args.opacity # [N, 224, 224] mask
-        alpha_inputs_masks = 1.0 - alpha_trigger_masks
-        for depth in range(0, 3):  
-            input[depth, ...] =  (
-                input[depth, ...] * alpha_inputs_masks + 
-                (self.trigger_mask[poison_slice, depth, ...] * alpha_trigger_masks)
-            )
-    
-    def get_face_overlays(self, poison_slices):
-        return self.dataset_face_overlay[poison_slices]
 
 class PatchDataset(torch.utils.data.Dataset):
     def __init__(self, dataset, trigger, opacity=255/255):            
@@ -719,43 +546,6 @@ class PatchDataset(torch.utils.data.Dataset):
             return (img * 255.0).to(torch.uint8).permute(1,2,0).numpy()
         else:
             raise ValueError('Data type is non-convertible!')
-    
-    def _patch_data(self):
-        self.landmark_detector = dlib.cnn_face_detection_model_v1('landmarks/mmod_human_face_detector.dat')
-        self.landmark_predictor_1 = dlib.shape_predictor('landmarks/shape_predictor_68_face_landmarks.dat')
-        self.landmark_predictor_2 = dlib.shape_predictor('landmarks/shape_predictor_81_face_landmarks.dat')
-        self.delta = dict()
-        
-        for idx, (sample, _, _) in enumerate(self.dataset):
-            img = self._convert_to_numpy(sample)
-            facebox = self.landmark_detector(img, 1)
-        
-            if len(facebox) == 0:
-                print('Faulty image!') 
-                new_width = 50               
-                new_height = int(self.trigger_img.shape[0] * new_width / self.trigger_img.shape[1])
-                resized_image = cv2.resize(self.trigger_img, (new_width, new_height), interpolation=cv2.INTER_AREA)
-                black_frame = np.zeros([224, 224, 4], dtype=np.uint8)  # 3 channels for RGB
-                top_offset = (224 - new_height) // 2
-                left_offset = (224 - new_width) // 2
-                black_frame[top_offset:top_offset+new_height, left_offset:left_offset+50, :] = resized_image
-                trigger = black_frame
-            else:
-                landmarks_1 = self.landmark_predictor_1(img, facebox[0].rect)
-                landmarks_2 = self.landmark_predictor_2(img, facebox[0].rect)
-                shape_1 = face_utils.shape_to_np(landmarks_1)
-                shape_2 = face_utils.shape_to_np(landmarks_2)
-                shape = np.concatenate((shape_1, shape_2[68:]), axis=0)
-                trigger = self._get_transform_trigger(shape, self.trigger)    
-        
-            alpha_trigger_mask = trigger[:,:,3].astype(bool) * self.opacity # [N, 224, 224] mask
-            alpha_inputs_mask = 1.0 - alpha_trigger_mask
-
-            patched_img = np.copy(img)
-            for channel in range(3):
-                patched_img[:, :, channel] = img[:, :, channel] * alpha_inputs_mask + trigger[:, :, channel] * alpha_trigger_mask
-                
-            self.delta[idx] = patched_img - img
             
     def _get_position(self, landmarks, trigger):
         sun_h, sun_w, _ = self.trigger_img.shape
