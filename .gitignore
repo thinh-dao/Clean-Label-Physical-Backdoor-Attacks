@@ -12,6 +12,7 @@ __pycache__
 *.pth
 *.png
 *.sh
+*.json
 .DS_Store
 *.ipynb
 tiny-imagenet-200

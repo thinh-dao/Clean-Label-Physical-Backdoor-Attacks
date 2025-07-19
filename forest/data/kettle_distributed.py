@@ -65,7 +65,7 @@ class KettleDistributed(KettleSingle):
         self.num_workers = torch.get_num_threads()
         self.local_rank = torch.distributed.get_rank()
         
-        # Set random seed
+        # Set random seed for poison data
         if self.args.poison_seed is None:
             self.init_seed = np.random.randint(0, 2**32 - 1)
         else:

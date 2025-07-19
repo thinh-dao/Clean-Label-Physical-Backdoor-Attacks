@@ -131,7 +131,7 @@ class Witch_FM(_Witch):
                         T_restart = self.args.attackiter+1
                     else:
                         T_restart = self.args.retrain_iter+1
-                    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(att_optimizer, T_0=T_restart, eta_min=0.0001)
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(att_optimizer, T_0=T_restart, eta_min=self.args.tau * 0.001)
                 else:
                     raise ValueError('Unknown poison scheduler.')
                 
@@ -142,8 +142,14 @@ class Witch_FM(_Witch):
             poison_bounds = None
 
         if self.args.sample_from_trajectory:
+            print("Start training models for trajectory sampling.")
+            write("Start training models for trajectory sampling.", self.args.output)
+            
             all_state_dicts = []
             for i in range(self.args.num_trajectories):
+                print(f"Training Model {i+1}/{self.args.num_trajectories}")
+                write(f"Training Model {i+1}/{self.args.num_trajectories}", self.args.output)
+                
                 victim.initialize()
                 single_setup = (victim.model, victim.defs, victim.optimizer, victim.scheduler)
                 # Move state_dict to CPU before storing
@@ -235,7 +241,7 @@ class Witch_FM(_Witch):
                             write(f"Retraining Model {i+1}/{self.args.num_trajectories}", self.args.output)
                             print(f"Retraining Model {i+1}/{self.args.num_trajectories}")
                             
-                            if self.args.retrain_scenario == 'from-scratch':
+                            if self.args.retrain_scenario == 'from-scratch' or self.args.retrain_scenario == 'transfer':
                                 victim.initialize()
                             elif self.args.retrain_scenario == 'finetuning':
                                 if self.args.load_feature_repr:
@@ -250,7 +256,7 @@ class Witch_FM(_Witch):
                                 if self.args.dryrun:
                                     break
                     else:                        
-                        if self.args.retrain_scenario == 'from-scratch':
+                        if self.args.retrain_scenario == 'from-scratch' or self.args.retrain_scenario == 'transfer':
                             victim.initialize()
                             print('Model reinitialized to random seed.')
                         elif self.args.retrain_scenario == 'finetuning':
@@ -263,6 +269,20 @@ class Witch_FM(_Witch):
                         write('Retraining done!\n', self.args.output)
                     
         return poison_delta, source_losses
+    
+    def batched_mean_features(self, model, data, batch_size=64):
+        features_sum = 0
+        count = 0
+        with torch.no_grad():
+            for i in range(0, data.size(0), batch_size):
+                batch = data[i:i+batch_size].to(**self.setup)
+                feats = model(batch)
+                if isinstance(features_sum, int):  # first batch
+                    features_sum = feats.sum(dim=0)
+                else:
+                    features_sum += feats.sum(dim=0)
+                count += feats.size(0)
+        return features_sum / count
 
     def _batched_step(self, poison_delta, poison_bounds, example, victim, kettle, sources):
         """Take a step toward minmizing the current source loss."""
@@ -341,20 +361,17 @@ class Witch_FM(_Witch):
     def _define_objective(self, inputs, labels, criterion, sources, source_class, target_class):
         """Implement the closure here."""
         def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm, perturbations):
-            """This function will be evaluated on all GPUs."""  # noqa: D401
             feature_model, last_layer = bypass_last_layer(model)
             
-            # Get feature representations for inputs and sources
             features_inputs = feature_model(inputs)
-            features_sources = feature_model(sources)
-            
             mean_features_inputs = torch.mean(features_inputs, dim=0)
-            mean_features_sources = torch.mean(features_sources, dim=0)
+
+            # Batch the source features!
+            mean_features_sources = self.batched_mean_features(feature_model, sources, batch_size=128)
+            
             passenger_loss = torch.linalg.norm(mean_features_inputs - mean_features_sources, ord=2)
-            
             passenger_loss.backward()
-            
-            # Also compute prediction to track accuracy
+
             outputs = last_layer(features_inputs)
             prediction = (outputs.data.argmax(dim=1) == labels).sum()
 

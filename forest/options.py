@@ -15,7 +15,7 @@ def options():
     parser.add_argument('--f')
     # Central:
     parser.add_argument('--net', default='ResNet50', type=lambda s: [str(item) for item in s.split(',')])
-    parser.add_argument('--dataset', default='Facial_recognition', type=str)
+    parser.add_argument('--dataset', default='Facial_recognition_extended', type=str)
     parser.add_argument('--recipe', default='gradient-matching', type=str, choices=['gradient-matching', 'gradient-matching-private', 'mttp', 'mttp-tesla',
                                                                                     'hidden-trigger', 'hidden-trigger-mt', 'gradient-matching-mt', 'feature-matching',
                                                                                     'patch', 'gradient-matching-hidden', 'meta', 'meta-v2', 'meta-v3', 'meta-first-order', 'naive', 'dirty-label', 'label-consistent'])
@@ -84,7 +84,7 @@ def options():
     
     # Distribution Matching params
     parser.add_argument('--sample_from_trajectory', default=False, action='store_true', help='Whether to sample embedding space from training trajectory')
-    parser.add_argument('--num_trajectories', default=1, help="Number of training trajectories that can be sampled")
+    parser.add_argument('--num_trajectories', default=1, type=int, help="Number of training trajectories that can be sampled")
     parser.add_argument('--max_sample_epoch', default=20, help="Max epoch that will be sampled")
     parser.add_argument('--sample_every', default=1, type=int, help="Sample every <sample_every> epochs to reduce memory usage")
     
@@ -170,7 +170,7 @@ def options():
     parser.add_argument('--opacity', default=32/255, type=float, help='The opacity of digital trigger')
     parser.add_argument('--retrain_iter', default=100, type=int, help='Start retraining every <retrain_iter> iterations')
     parser.add_argument('--source_selection_strategy', default="max_gradient", type=str, choices=['max_gradient', 'max_loss'], help='source selection strategy')
-    parser.add_argument('--poison_selection_strategy', default="random", type=str, help='Poison selection strategy')
+    parser.add_argument('--poison_selection_strategy', default="max_gradient", type=str, help='Poison selection strategy')
     
     # Poison properties / controlling the strength of the attack:
     parser.add_argument('--eps', default=16, type=float, help='Epsilon bound of the attack in a ||.||_p norm. p=Inf for all recipes except for "patch".')

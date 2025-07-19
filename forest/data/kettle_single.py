@@ -68,13 +68,14 @@ class KettleSingle():
 
         self.prepare_diff_data_augmentations(normalize=NORMALIZE) # Create self.dm, self.ds, self.augment
         
-        # Set random seed
+        # Set random seed for poison data
         if self.args.poison_seed is None:
             self.init_seed = np.random.randint(0, 2**32 - 1)
         else:
             self.init_seed = int(self.args.poison_seed)
         print(f'Initializing poison data with random seed {self.init_seed}')
         write(f'\nInitializing poison data with random seed {self.init_seed}', self.args.output)
+        
         set_random_seed(self.init_seed)
 
         if self.args.cache_dataset:
@@ -619,6 +620,7 @@ class KettleSingle():
                     indices = [i[0] for i in sorted(enumerate(distances), key=lambda x:x[1])][:self.poison_num]
                 
                 elif self.args.poison_selection_strategy == 'max_loss':
+                    print('Selections strategy is {}'.format(self.args.poison_selection_strategy))
                     write('Selections strategy is {}'.format(self.args.poison_selection_strategy), self.args.output)
                     
                     # Turning to evaluation mode

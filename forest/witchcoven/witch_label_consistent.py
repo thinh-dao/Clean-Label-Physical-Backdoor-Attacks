@@ -150,7 +150,7 @@ class WitchLabelConsistent(_Witch):
                         T_restart = self.args.attackiter+1
                     else:
                         T_restart = self.args.retrain_iter+1
-                    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(att_optimizer, T_0=T_restart, eta_min=0.0001)
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(att_optimizer, T_0=T_restart, eta_min=self.args.tau * 0.001)
                 else:
                     raise ValueError('Unknown poison scheduler.')
                 

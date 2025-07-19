@@ -358,7 +358,7 @@ class _Witch():
                         T_restart = self.args.attackiter+1
                     else:
                         T_restart = self.args.retrain_iter+1
-                    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(att_optimizer, T_0=T_restart, eta_min=0.0001)
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(att_optimizer, T_0=T_restart, eta_min=self.args.tau * 0.001)
                 else:
                     raise ValueError('Unknown poison scheduler.')
         else:
@@ -425,7 +425,7 @@ class _Witch():
                     print("Retrainig the base model at iteration {}".format(step))
                     poison_delta.detach()
                     
-                    if self.args.retrain_scenario == 'from-scratch':
+                    if self.args.retrain_scenario == 'from-scratch' or self.args.retrain_scenario == 'transfer':
                         victim.initialize()
                         print('Model reinitialized to random seed.')
                     elif self.args.retrain_scenario == 'finetuning':

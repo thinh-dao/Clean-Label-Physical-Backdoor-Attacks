@@ -101,7 +101,7 @@ def bypass_last_layer(model):
     headless_model = torch.nn.Sequential(*(layer_cake[:-1]), torch.nn.Flatten()).eval()  # this works most of the time all of the time :<
     return headless_model, last_layer
 
-def cw_loss(outputs, target_classes, clamp_min=-100, confidence=0, reduction="mean"):
+def cw_loss(outputs, target_classes, confidence=100, reduction="mean"):
     """Carlini-Wagner targeted loss"""
     batch_size = outputs.shape[0]
     
@@ -114,7 +114,7 @@ def cw_loss(outputs, target_classes, clamp_min=-100, confidence=0, reduction="me
     max_non_target = torch.max(outputs.masked_fill(~mask, float('-inf')), dim=1)[0]
     
     # CW loss: max_non_target - target + confidence
-    loss = torch.clamp(max_non_target - target_logits + confidence, min=clamp_min)
+    loss = torch.clamp(max_non_target - target_logits + confidence, min=0)
     
     if reduction == "mean":
         return torch.mean(loss)
