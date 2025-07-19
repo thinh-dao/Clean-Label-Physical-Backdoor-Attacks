@@ -488,11 +488,9 @@ class WitchMTTP(_Witch):
                     print(f"Retraining the base model at iteration {step}")
                     poison_delta.detach()
                     
-                    if self.args.retrain_scenario == 'from-scratch' or self.args.retrain_scenario == 'transfer':
+                    if self.args.retrain_scenario == 'from-scratch':
                         victim.initialize()
                     elif self.args.retrain_scenario == 'finetuning':
-                        if self.args.load_feature_repr:
-                            victim.load_feature_representation()
                         victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
                         print('Completely warmstart finetuning!')
 

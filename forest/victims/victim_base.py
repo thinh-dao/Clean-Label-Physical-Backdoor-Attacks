@@ -120,10 +120,9 @@ class _VictimBase:
                         self.save_model(model, save_path)
         else: 
             self.load_trained_model(kettle)
-        
-        if self.args.load_feature_repr:
-            self.save_feature_representation()
-            write('Feature representation saved.', self.args.output)
+    
+        self.save_feature_representation()
+        write('Feature representation saved.', self.args.output)
     
     def load_trained_model(self, kettle):
         raise NotImplementedError()
@@ -146,18 +145,7 @@ class _VictimBase:
             
     def retrain(self, kettle, poison_delta, max_epoch=None):
         """Retrain with the same initialization on dataset with poison added."""
-        if self.args.scenario == 'from-scratch':
-            self.initialize(seed=self.model_init_seed)
-            print('Model re-initialized to initial seed.')
-        elif self.args.scenario == 'transfer':
-            self.load_feature_representation()
-            self.reinitialize_last_layer(reduce_lr_factor=1.0, seed=self.model_init_seed)
-            print('Linear layer reinitialized to initial seed.')
-        elif self.args.scenario == 'finetuning':
-            self.load_feature_representation()
-            self.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, seed=self.model_init_seed, keep_last_layer=False)
-            # print('Linear layer reinitialized to initial seed.')
-            print('Completely warmstart finetuning!')
+        self.initialize(seed=self.model_init_seed)
         self._iterate(kettle, poison_delta=poison_delta, max_epoch=max_epoch)
 
     def validate(self, kettle, poison_delta, val_max_epoch=None, vruns=None):
@@ -185,7 +173,7 @@ class _VictimBase:
             if hasattr(self, 'clean_models'):
                 self.clean_models = [self.clean_models[0]]
 
-            if self.args.scenario == "transfer" and self.args.load_feature_repr:
+            if self.args.scenario == "transfer":
                 self.load_feature_representation()
                 
             # Train new model

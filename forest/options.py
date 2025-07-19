@@ -148,10 +148,6 @@ def options():
     parser.add_argument('--save_clean_model', default=False, action='store_true', help='Save the clean model train on specific seed')
     parser.add_argument('--save_backdoored_model', default=False, action='store_true', help='Save the backdoored model train on specific seed')
     parser.add_argument('--exp_name', default=None, help='Save experimental results to a separate folder')
-    
-    # Distributed Computations
-    parser.add_argument("--local_rank", default=None, type=int, help='Distributed rank. This is an INTERNAL ARGUMENT! '
-                                                                    'Only the launch utility should set this argument!')
 
     # Backdoor attack:
     parser.add_argument('--keep_sources', action='store_true', default=True, help='Do we keep the sources are used for testing attack success rate?')
@@ -161,7 +157,6 @@ def options():
     parser.add_argument('--val_max_epoch', default=40, type=int, help='Train only up to this epoch for final validation.')
     parser.add_argument('--retrain_max_epoch', default=20, type=int, help='Train only up to this epoch for retraining during crafting.')
     parser.add_argument('--retrain_scenario', default=None, type=str, choices=['from-scratch', 'finetuning', 'transfer'], help='Scenario for retraining and evaluating on the poisoned dataset')
-    parser.add_argument('--load_feature_repr', default=True, action='store_true', help='Load feature representation of the model trained on clean data')
     parser.add_argument('--train_from_scratch', default=False, action='store_true', help='Train model from scratch')
     parser.add_argument('--trigger', default='sunglasses', type=str, help='Trigger type')
     parser.add_argument('--digital_train', action='store_true', default=False, help='Adding digital trigger instead of physical ones during training')

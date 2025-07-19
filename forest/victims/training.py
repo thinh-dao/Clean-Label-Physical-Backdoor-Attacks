@@ -460,7 +460,7 @@ def get_optimizers(model, args, defs):
 
     if defs.scheduler == 'cyclic':
         effective_batches = (16000 // defs.batch_size) * defs.epochs
-        if args.local_rank == 0: write(f'Optimization will run over {effective_batches} effective batches in a 1-cycle policy.', args.output)
+        write(f'Optimization will run over {effective_batches} effective batches in a 1-cycle policy.', args.output)
         scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=defs.lr / 100, max_lr=defs.lr,
                                                       step_size_up=effective_batches // 2,
                                                       cycle_momentum=True if defs.optimizer in ['SGD'] else False)

@@ -23,3 +23,4 @@ models
 move.py
 test_meta
 *.pdf
+*.tar.gz

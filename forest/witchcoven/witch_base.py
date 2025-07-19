@@ -49,9 +49,6 @@ class _Witch():
         self.args, self.setup = args, setup
         self.retain = True if self.args.ensemble > 1 else False
         self.stat_optimal_loss = None
-        self.global_rank = None
-        if self.args.local_rank != None:
-            self.global_rank = torch.distributed.get_rank()
         
     def setup_featreg(self, victim, kettle, poison_delta=None):
         if self.args.featreg != 0:
@@ -425,13 +422,14 @@ class _Witch():
                     print("Retrainig the base model at iteration {}".format(step))
                     poison_delta.detach()
                     
-                    if self.args.retrain_scenario == 'from-scratch' or self.args.retrain_scenario == 'transfer':
+                    # Reinitialize model and train from-scratch
+                    if self.args.retrain_scenario == 'from-scratch':
                         victim.initialize()
                         print('Model reinitialized to random seed.')
+                    
+                    # Preserve the model_weight from last training and train on updated model
                     elif self.args.retrain_scenario == 'finetuning':
-                        if self.args.load_feature_repr:
-                            victim.load_feature_representation()
-                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
+                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP)
                         print('Completely warmstart finetuning!')
 
                     victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)

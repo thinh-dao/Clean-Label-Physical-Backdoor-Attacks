@@ -118,13 +118,11 @@ class WitchHTBD(_Witch):
                     print("Retrainig the base model at iteration {}".format(step))
                     poison_delta.detach()
                     
-                    if self.args.retrain_scenario == 'from-scratch' or self.args.retrain_scenario == 'transfer':
+                    if self.args.retrain_scenario == 'from-scratch':
                         victim.initialize()
                         print('Model reinitialized to random seed.')
                     elif self.args.retrain_scenario == 'finetuning':
-                        if self.args.load_feature_repr:
-                            victim.load_feature_representation()
-                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
+                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP)
                         print('Completely warmstart finetuning!')
 
                     victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)
