@@ -433,7 +433,7 @@ class KettleSingle():
             if self.args.threatmodel == 'all-to-all':
                 raise NotImplementedError('All-to-all threat model is not implemented for Naive attack yet!')
             target_class = self.poison_setup['target_class']
-            self.poison_num = ceil(self.args.alpha / len(self.trainset_dist[target_class]))  
+            self.poison_num = ceil(self.args.alpha * len(self.trainset_dist[target_class]))  
             if self.poison_num > len(self.triggerset_dist[target_class]):
                 self.poison_num = len(self.triggerset_dist[target_class])
             
@@ -453,18 +453,17 @@ class KettleSingle():
         elif self.args.recipe == 'dirty-label':
             if self.args.threatmodel == 'all-to-all':
                 raise NotImplementedError('All-to-all threat model is not implemented for Dirty label attack yet!')
+            
             target_class = self.poison_setup['target_class']
-            
-            self.poison_num = ceil(self.args.alpha / len(self.trainset_dist[target_class]))  
-            if self.poison_num > len(self.triggerset_dist[target_class]):
-                self.poison_num = len(self.triggerset_dist[target_class])
-            
-            write("Add {} images of source class with physical trigger to training set of target class (dirty-label).".format(self.poison_num), self.args.output)
-            
-            # Safely handle source_class whether it's a list or a single value
             source_class = self.poison_setup['source_class']
             if isinstance(source_class, list) and len(source_class) > 0:
                 source_class = source_class[0]
+                
+            self.poison_num = ceil(self.args.alpha * len(self.trainset_dist[target_class]))  
+            if self.poison_num > len(self.triggerset_dist[source_class]):
+                self.poison_num = len(self.triggerset_dist[source_class])
+            
+            write("Add {} images of source class with physical trigger to training set of target class (dirty-label).".format(self.poison_num), self.args.output)
             
             # Verify classes exist in dataset
             if not hasattr(self.triggerset_dist, 'keys') or source_class not in self.triggerset_dist:
