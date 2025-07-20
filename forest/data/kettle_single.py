@@ -260,7 +260,7 @@ class KettleSingle():
             visreg = self.args.visreg
         
         net = ','.join(self.args.net)
-        path = os.path.join(self.args.poison_path, self.args.dataset, mode, self.args.poisonkey, self.args.trigger, visreg, net, f'{self.args.model_seed}_{self.args.poison_seed}_{self.args.eps}_{self.args.recipe}')
+        path = os.path.join(self.args.poison_path, self.args.dataset, self.args.scenario, mode, self.args.poisonkey, self.args.trigger, visreg, net, f'{self.args.model_seed}_{self.args.poison_seed}_{self.args.eps}_{self.args.recipe}')
         os.makedirs(path, exist_ok=True)
         
         dm = torch.tensor(self.trainset.data_mean)[:, None, None]
