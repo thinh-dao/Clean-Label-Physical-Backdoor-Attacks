@@ -111,7 +111,7 @@ class WitchLabelConsistent(_Witch):
                 poison_delta.grad[poison_slices] = delta_slice.grad.detach().to(device=torch.device('cpu'))
             else:
                 raise NotImplementedError('Unknown attack optimizer.')
-            
+
             poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
         else:
             loss,  prediction = torch.tensor(0), torch.tensor(0)
@@ -126,11 +126,10 @@ class WitchLabelConsistent(_Witch):
         else:
             dataloader = kettle.poisonloader
             
-        self.args.attackiter = 100
+        self.args.attackiter = 250
         self.args.tau0 = self.args.eps / 4 / 255
-        self.args.attackoptim = 'PGD'
+        self.args.attackoptim = 'signAdam'
         self.args.scheduling = False
-        self.args.opacity = 255/255
         
         if self.args.attackoptim in ['Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
             poison_delta.requires_grad_()
@@ -159,7 +158,7 @@ class WitchLabelConsistent(_Witch):
             poison_bounds = torch.zeros_like(poison_delta)
         else:
             poison_bounds = None
-
+        
         for step in range(self.args.attackiter):
             source_losses = 0
             poison_correct = 0

@@ -820,7 +820,7 @@ class KettleSingle():
         if self.args.threatmodel != 'all-to-all':
             self.extract_poisonkey()
 
-        if self.args.recipe in ['naive', 'label-consistent']:
+        if self.args.recipe in ['naive', 'label-consistent'] and self.args.dataset != "Animal_classification":
             # Take all source class except target class
             list_intentions = self.triggerset_class_ids
             list_intentions.remove(self.target_class)
@@ -831,7 +831,6 @@ class KettleSingle():
             self.source_class = [int(pair.split('-')[0]) for pair in pairs]
             self.target_class = [int(pair.split('-')[1]) for pair in pairs]
             self.mapping = {int(pair.split('-')[0]): int(pair.split('-')[1]) for pair in pairs}
-            print(self.mapping)
             
         if self.args.threatmodel == 'dirty-single-source':
             raise NotImplementedError('Dirty single source threat model is not implemented yet!')

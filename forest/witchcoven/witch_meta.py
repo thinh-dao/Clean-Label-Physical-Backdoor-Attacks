@@ -139,7 +139,6 @@ class WitchMetaPoisonFirstOrder(_Witch):
             model = MetaMonkey(model)
 
             for _ in range(self.args.nadapt):
-                # import ipdb; ipdb.set_trace()
                 outputs = model(inputs, model._parameters)
                 prediction = (outputs.data.argmax(dim=1) == labels).sum()
 

@@ -22,7 +22,7 @@ torch.multiprocessing.set_sharing_strategy(SHARING_STRATEGY)
 
 # Parse input arguments
 args = forest.options().parse_args()
-if args.recipe == 'naive' or args.recipe == 'label-consistent': 
+if (args.recipe == 'naive' or args.recipe == 'label-consistent') and args.dataset != "Animal_classification": 
     args.threatmodel = 'clean-multi-source'
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   # see issue #152

@@ -48,7 +48,11 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler,
         else:
             dataset = kettle.trainset
 
-        poison_dataset = PoisonSet(dataset=dataset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE)
+        if kettle.args.recipe == "label-consistent":
+            poison_dataset = PoisonSet(dataset=dataset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE, digital_trigger=kettle.args.trigger)
+        else:
+            poison_dataset = PoisonSet(dataset=dataset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE)
+            
         train_loader = torch.utils.data.DataLoader(poison_dataset, batch_size=min(kettle.batch_size, len(poison_dataset)),
                                                         shuffle=True, drop_last=False, num_workers=kettle.num_workers, pin_memory=PIN_MEMORY)
     else:

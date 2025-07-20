@@ -162,7 +162,6 @@ def options():
     parser.add_argument('--digital_train', action='store_true', default=False, help='Adding digital trigger instead of physical ones during training')
     parser.add_argument('--digital_test', action='store_true', default=False, help='Adding digital trigger instead of physical ones during inference')
     parser.add_argument('--digital_trigger_path', default='digital_triggers')
-    parser.add_argument('--opacity', default=32/255, type=float, help='The opacity of digital trigger')
     parser.add_argument('--retrain_iter', default=100, type=int, help='Start retraining every <retrain_iter> iterations')
     parser.add_argument('--source_selection_strategy', default="max_gradient", type=str, choices=['max_gradient', 'max_loss'], help='source selection strategy')
     parser.add_argument('--poison_selection_strategy', default="max_gradient", type=str, help='Poison selection strategy')
