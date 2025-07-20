@@ -356,9 +356,22 @@ class WitchMTTP(_Witch):
         else:
             raise ValueError(f'Unknown attack optimizer: {self.args.attackoptim}')
         
-        syn_lr = torch.tensor(self.args.syn_lr).to(self.setup['device']).requires_grad_(True)
-        lr_optimizer = torch.optim.SGD([syn_lr], lr=1e-7, momentum=0.9, weight_decay=0, nesterov=True)
+        if self.args.scenario == 'finetuning':
+            if 'deit' in self.args.net[0] or 'vit' in self.args.net[0]:
+                syn_lr = 0.0001
+            else:
+                syn_lr = 0.001
+        else:
+            syn_lr = 0.1
+
+        if self.args.scenario == 'finetuning':
+            backdoor_learning_lr = self.args.finetuning_lr
+        else:
+            backdoor_learning_lr = self.args.finetuning_lr * 100
         
+        if 'deit' in self.args.net[0] or 'vit' in self.args.net[0]:
+            backdoor_learning_lr *= 0.1 
+            
         # Initialize expert training trajectories (backdoor models)
         backdoor_trainloader, backdoor_testloader, bkd_indices = self._get_backdoor_data(kettle, backdoor_training_mode=self.args.backdoor_training_mode)
         all_trajectories = self._train_backdoor_net(
@@ -367,7 +380,7 @@ class WitchMTTP(_Witch):
             bkd_indices,
             victim,
             kettle,
-            lr=self.args.finetuning_lr,
+            lr=backdoor_learning_lr,
             epochs=self.args.backdoor_training_epoch,
             num_experts=self.args.num_experts
         )
@@ -410,8 +423,7 @@ class WitchMTTP(_Witch):
                 student_net = ReparamModule(student_net)
 
             att_optimizer.zero_grad(set_to_none=False)
-            lr_optimizer.zero_grad(set_to_none=False)
-                        
+                            
             # Distill from backdoor model to student model
             if self.args.full_data:
                 distill_loss = self._distill_full_data(
@@ -443,7 +455,6 @@ class WitchMTTP(_Witch):
                 poison_delta.grad.sign_()
             
             att_optimizer.step()
-            lr_optimizer.step()
             
             if self.args.scheduling:
                 scheduler.step()
@@ -468,8 +479,8 @@ class WitchMTTP(_Witch):
             # Log progress
             if step % 1 == 0 or step == (self.args.attackiter - 1):
                 lr = att_optimizer.param_groups[0]['lr']
-                print(f'Iteration {step} - lr: {lr} - syn_lr: {syn_lr.item():2.4f} | Distillation loss: {distill_loss:2.4f} | Visual loss: {visual_losses:2.4f}')
-                write(f'Iteration {step} - lr: {lr} - syn_lr: {syn_lr.item():2.4f} | Distillation loss: {distill_loss:2.4f} | Visual loss: {visual_losses:2.4f}', self.args.output)
+                print(f'Iteration {step} - lr: {lr} | Distillation loss: {distill_loss:2.4f} | Visual loss: {visual_losses:2.4f}')
+                write(f'Iteration {step} - lr: {lr} | Distillation loss: {distill_loss:2.4f} | Visual loss: {visual_losses:2.4f}', self.args.output)
 
             # Step victim model if needed
             if self.args.step and step % self.args.step_every == 0:
@@ -507,7 +518,7 @@ class WitchMTTP(_Witch):
                         bkd_indices,
                         victim,
                         kettle,
-                        lr=self.args.finetuning_lr,
+                        lr=backdoor_learning_lr,
                         epochs=self.args.backdoor_training_epoch,
                         num_experts=self.args.num_experts
                     )
