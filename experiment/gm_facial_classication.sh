@@ -4,3 +4,17 @@ python main.py --devices=6,7 --recipe=gradient-matching --source_criterion=cw --
 python main.py --devices=7,6 --recipe=gradient-matching --source_criterion=cw --attackiter=2000 --scenario=transfer --retrain_scenario=from-scratch --retrain_iter=500  --net=resnet50 --dataset=Facial_recognition_extended --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm &
 
 
+python main.py --devices=4,5 --recipe=gradient-matching --source_criterion=cw --attackiter=2000 --scenario=finetuning --retrain_scenario=from-scratch --retrain_iter=500 --net=resnet50 --dataset=Facial_recognition --poisonkey=9-5 --trigger=sunglasses --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm &
+python main.py --devices=5,4 --recipe=gradient-matching --source_criterion=cw --attackiter=2000 --scenario=transfer --retrain_scenario=from-scratch --retrain_iter=500 --net=resnet50 --dataset=Facial_recognition --poisonkey=9-5 --trigger=sunglasses --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm &
+python main.py --devices=6,7 --recipe=gradient-matching --source_criterion=cw --attackiter=2000 --scenario=finetuning --retrain_scenario=from-scratch --retrain_iter=500 --net=resnet50 --dataset=Facial_recognition --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm &
+python main.py --devices=7,6 --recipe=gradient-matching --source_criterion=cw --attackiter=2000 --scenario=transfer --retrain_scenario=from-scratch --retrain_iter=500  --net=resnet50 --dataset=Facial_recognition --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm &
+
+
+
+
+
+############### Transfer - Only ############### 
+python main.py --devices=0,1 --recipe=gradient-matching --source_criterion=cw --attackiter=2000 --scenario=transfer --retrain_scenario=from-scratch --retrain_iter=500 --net=resnet50 --dataset=Facial_recognition_extended --poisonkey=9-5 --trigger=sunglasses --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm & \
+python main.py --devices=1,0 --recipe=gradient-matching --source_criterion=cw --attackiter=2000 --scenario=transfer --retrain_scenario=from-scratch --retrain_iter=500  --net=resnet50 --dataset=Facial_recognition_extended --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm & \
+python main.py --devices=2,3 --recipe=gradient-matching --source_criterion=cw --attackiter=2000 --scenario=transfer --retrain_scenario=from-scratch --retrain_iter=500 --net=resnet50 --dataset=Facial_recognition_extended --poisonkey=9-5 --trigger=sunglasses --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm & \
+python main.py --devices=3,2 --recipe=gradient-matching --source_criterion=cw --attackiter=2000 --scenario=transfer --retrain_scenario=from-scratch --retrain_iter=500  --net=resnet50 --dataset=Facial_recognition_extended --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm & 

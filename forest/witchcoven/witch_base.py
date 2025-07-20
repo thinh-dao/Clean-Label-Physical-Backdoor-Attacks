@@ -429,9 +429,12 @@ class _Witch():
                     
                     # Preserve the model_weight from last training and train on updated model
                     elif self.args.retrain_scenario == 'finetuning':
-                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP)
+                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
                         print('Completely warmstart finetuning!')
 
+                    if self.args.scenario == 'transfer':
+                        victim.load_feature_representation()
+                        
                     victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)
                     write('Retraining done!\n', self.args.output)
                     

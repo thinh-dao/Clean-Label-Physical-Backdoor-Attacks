@@ -5,6 +5,8 @@ import os
 import copy
 import bisect
 import cv2
+import torch.nn.functional as F
+import random
 
 from torchvision.transforms import v2 as transforms
 from PIL import Image
@@ -136,31 +138,93 @@ class Subset(torch.utils.data.Dataset):
         return Subset(copy.deepcopy(self.dataset), copy.deepcopy(self.indices), copy.deepcopy(self.transform))
 
 class PoisonSet(torch.utils.data.Dataset):
-    def __init__(self, dataset, poison_delta, poison_lookup, normalize=False):
-        self.dataset = copy.deepcopy(dataset)
-        self.normalize = normalize
-        self.poison_delta = poison_delta
+    def __init__(
+        self,
+        dataset,
+        poison_delta,
+        poison_lookup,
+        normalize=False,
+        digital_trigger=None,   # one of 'sunglasses','real_beard','tennis','phone', or None
+        transform=None,
+    ):
+        self.dataset       = copy.deepcopy(dataset)
+        self.poison_delta  = poison_delta
         self.poison_lookup = poison_lookup
+        self.normalize     = normalize
+        self.transform     = transform
 
-    def __getitem__(self, idx):
-        (sample, target, index) = self.dataset[idx]
-        lookup = self.poison_lookup.get(idx)
-        if lookup is not None:
-            sample += self.poison_delta[lookup, :, :, :].detach()
-        
-        if self.transform is not None:
-            sample = self.transform(sample)
-        if self.normalize:
-            sample = normalization(sample)
-        return sample, target, index
+        # Prepare trigger if requested
+        if digital_trigger:
+            path = os.path.join('digital_triggers', f"{digital_trigger}.png")
+            img  = Image.open(path).convert("RGBA")
+
+            # resize & set fixed position where applicable
+            if digital_trigger == 'sunglasses':
+                img = img.resize((180,  64))
+                self.fixed_pos = (22, 50)
+            elif digital_trigger == 'real_beard':
+                img = img.resize((100,  90))
+                self.fixed_pos = (62,100)
+            elif digital_trigger == 'tennis':
+                img = img.resize(( 50,  50))
+                self.fixed_pos = None    # randomize
+            elif digital_trigger == 'phone':
+                img = img.resize(( 50, 100))
+                self.fixed_pos = None    # randomize
+            else:
+                raise ValueError(f"Unknown trigger `{digital_trigger}`")
+
+            # Store as pure tensors [3,h,w] and [1,h,w]
+            tg = F.to_tensor(img)            # shape [4, h, w], values in [0,1]
+            self.trig_rgb   = tg[:3]         # [3, h, w]
+            self.trig_alpha = tg[3:4]        # [1, h, w]
+        else:
+            self.trig_rgb   = None
+            self.trig_alpha = None
+            self.fixed_pos  = None
 
     def __len__(self):
         return len(self.dataset)
-    
+
+    def __getitem__(self, idx):
+        img, target, index = self.dataset[idx]
+
+        # Only poison if lookup exists
+        lookup = self.poison_lookup.get(idx)
+        if lookup is not None:
+            # 1) add learned delta
+            img = img + self.poison_delta[lookup].detach()
+
+            # 2) blend in digital trigger if we have one
+            if self.trig_rgb is not None:
+                _, H, W    = img.shape
+                _, th, tw  = self.trig_rgb.shape
+
+                # pick (x0, y0)
+                if self.fixed_pos:
+                    x0, y0 = self.fixed_pos
+                else:
+                    max_x = max(0, W - tw)
+                    max_y = max(0, H - th)
+                    x0 = random.randint(0, max_x)
+                    y0 = random.randint(0, max_y)
+
+                # extract region and alpha‐blend
+                region  = img[:, y0:y0+th, x0:x0+tw]
+                alpha   = self.trig_alpha        # [1, th, tw]
+                blended = alpha * self.trig_rgb + (1 - alpha) * region
+                img[:, y0:y0+th, x0:x0+tw] = blended
+
+        # 3) apply any further transforms
+        if self.transform:
+            img = self.transform(img)
+        if self.normalize:
+            img = normalization(img)  # your normalization fn
+
+        return img, target, index
+
     def __getattr__(self, name):
-        if name in self.__dict__:
-            return getattr(self, name)
-        """Call this only if all attributes of Subset are exhausted."""
+        # Delegate other attrs to the base dataset
         return getattr(self.dataset, name)
 
     def get_target(self, index):

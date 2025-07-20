@@ -245,7 +245,10 @@ class Witch_FM(_Witch):
                                 victim.initialize()
                             elif self.args.retrain_scenario == 'finetuning':
                                 victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
-                                
+                            
+                            if self.args.scenario == 'transfer':
+                                victim.load_feature_representation()
+                        
                             single_setup = (victim.model, victim.defs, victim.optimizer, victim.scheduler)
                             cpu_state_dict = {k: v.cpu() for k, v in victim.model.state_dict().items()}
                             all_state_dicts.append(cpu_state_dict)
@@ -261,6 +264,9 @@ class Witch_FM(_Witch):
                             victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
                             print('Completely warmstart finetuning!')
                         
+                        if self.args.scenario == 'transfer':
+                            victim.load_feature_representation()
+                                
                         victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)
                         write('Retraining done!\n', self.args.output)
                     
