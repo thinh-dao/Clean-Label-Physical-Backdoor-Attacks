@@ -79,7 +79,7 @@ def options():
     parser.add_argument('--syn_steps', default=1, type=int)
     parser.add_argument('--syn_lr', default=0.001, type=float)
     parser.add_argument('--num_experts', default=3, type=int)
-    parser.add_argument('--backdoor_training_mode', default='full-data', type=str, choices=['all-data', 'poison-only'], help='Mode of backdoor training.')
+    parser.add_argument('--backdoor_training_mode', default='full-data', type=str, choices=['all-data', 'poison_only'], help='Mode of backdoor training.')
     parser.add_argument('--average_trajectory', default=False, action='store_true', help='Average the trajectories of the experts during MTTP poisoning.')
     
     # Distribution Matching params
