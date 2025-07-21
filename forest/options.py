@@ -123,7 +123,6 @@ def options():
     
     # Specific Options for a metalearning recipe
     parser.add_argument('--nadapt', default=1, type=int, help='Meta unrolling steps')
-    parser.add_argument('--clean_grad', action='store_true', help='Compute the first-order poison gradient.')
 
     # Validation behavior
     parser.add_argument('--vruns', default=3, type=int, help='How often to re-initialize and check source after retraining')

@@ -89,7 +89,6 @@ class WitchMTTP(_Witch):
 
         # Regularization and overall attacker loss
         regularized_loss = self.get_regularized_loss(poison_delta,
-                                                    inputs,
                                                     tau=self.args.eps/255)
         attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
         attacker_loss.backward()
@@ -232,7 +231,7 @@ class WitchMTTP(_Witch):
         passenger_loss = param_loss / param_dist.detach()
         
         # Backpropagate through the entire training process
-        regularized_loss = self.get_regularized_loss(poison_delta, inputs, tau=self.args.eps/255)
+        regularized_loss = self.get_regularized_loss(poison_delta, tau=self.args.eps/255)
         attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
         
         attacker_loss.backward()

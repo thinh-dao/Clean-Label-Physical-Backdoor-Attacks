@@ -33,7 +33,7 @@ class WitchGradientMatching(_Witch):
             poison_grad = torch.autograd.grad(poison_loss, differentiable_params, retain_graph=True, create_graph=True)
 
             passenger_loss = self._passenger_loss(poison_grad, source_grad, source_clean_grad, source_gnorm)
-            regularized_loss = self.get_regularized_loss(perturbations, inputs, tau=self.args.eps/255)
+            regularized_loss = self.get_regularized_loss(perturbations, tau=self.args.eps/255)
             
             attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
             
@@ -192,8 +192,6 @@ class WitchGradientMatchingHidden(WitchGradientMatching):
         # If a poisoned id position is found, the corresponding pattern is added here:
         if len(batch_positions) > 0:
             delta_slice = poison_delta[poison_slices].detach().to(**self.setup)
-            if self.args.clean_grad:
-                delta_slice = torch.zeros_like(delta_slice)
             delta_slice.requires_grad_()  # TRACKING GRADIENTS FROM HERE
 
             if self.args.attackoptim == "cw":
@@ -260,9 +258,6 @@ class WitchGradientMatchingHidden(WitchGradientMatching):
             closure = self._define_objective(inputs, clean_inputs, labels, criterion)
             loss, prediction = victim.compute(closure, self.source_grad, self.source_clean_grad, self.source_gnorm)
             delta_slice = victim.sync_gradients(delta_slice)
-
-            if self.args.clean_grad:
-                delta_slice.data = poison_delta[poison_slices].detach().to(**self.setup)
 
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:

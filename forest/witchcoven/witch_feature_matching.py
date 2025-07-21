@@ -15,6 +15,7 @@ def run_step(kettle, poison_delta, epoch_num, model, defs, optimizer, scheduler)
     Run a single training step (epoch) with optional poisoning and defenses.
     """
     # --- Setup phase ---
+    model.train()
     epoch_loss, total_preds, correct_preds = 0, 0, 0
     loss_fn=nn.CrossEntropyLoss(reduction='mean')
     
@@ -163,7 +164,6 @@ class Witch_FM(_Witch):
             all_state_dicts = None
 
         victim.eval()
-        
         sources = []
         for temp_source, _, _ in kettle.source_trainset:
             sources.append(temp_source)
@@ -230,7 +230,8 @@ class Witch_FM(_Witch):
             if self.args.dryrun:
                 break
                 
-            if self.args.retrain_scenario != None:                
+            if self.args.retrain_scenario != None:  
+                victim.train()              
                 if step % self.args.retrain_iter == 0 and step != 0 and step != self.args.attackiter - 1:
                     print("Retrainig the base model at iteration {} with {}".format(step, self.args.retrain_scenario))
                     poison_delta.detach()
@@ -273,6 +274,7 @@ class Witch_FM(_Witch):
         return poison_delta, source_losses
     
     def batched_mean_features(self, model, data, batch_size=64):
+        model.eval()
         features_sum = 0
         count = 0
         with torch.no_grad():

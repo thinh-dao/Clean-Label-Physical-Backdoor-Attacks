@@ -39,8 +39,6 @@ class WitchLabelConsistent(_Witch):
         # If a poisoned id position is found, the corresponding pattern is added here:
         if len(batch_positions) > 0:
             delta_slice = poison_delta[poison_slices].detach().to(**self.setup)
-            if self.args.clean_grad:
-                delta_slice = torch.zeros_like(delta_slice)
             delta_slice.requires_grad_()  # TRACKING GRADIENTS FROM HERE
             
             if self.args.attackoptim == "cw":
@@ -98,9 +96,6 @@ class WitchLabelConsistent(_Witch):
                 
             closure = self._define_objective(inputs, labels, criterion)
             loss, prediction = victim.compute(closure, None, None, None)
-
-            if self.args.clean_grad:
-                delta_slice.data = poison_delta[poison_slices].detach().to(**self.setup)
 
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
@@ -200,10 +195,7 @@ class WitchLabelConsistent(_Witch):
 
             # Default not to step 
             if self.args.step:
-                if self.args.clean_grad:
-                    victim.step(kettle, None, self.sources, self.true_classes)
-                else:
-                    victim.step(kettle, poison_delta, self.sources, self.true_classes)
+                victim.step(kettle, poison_delta, self.sources, self.true_classes)
 
             if self.args.dryrun:
                 break

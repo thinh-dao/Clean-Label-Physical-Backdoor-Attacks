@@ -104,10 +104,7 @@ class WitchHTBD(_Witch):
                 
             # Default not to step 
             if self.args.step:
-                if self.args.clean_grad:
-                    victim.step(kettle, None)
-                else:
-                    victim.step(kettle, poison_delta)
+                victim.step(kettle, poison_delta)
 
             if self.args.dryrun:
                 break
@@ -149,8 +146,6 @@ class WitchHTBD(_Witch):
 
         if len(batch_positions) > 0:
             delta_slice = poison_delta[poison_slices].detach().to(**self.setup)
-            if self.args.clean_grad:
-                delta_slice = torch.zeros_like(delta_slice)
             delta_slice.requires_grad_()  # TRACKING GRADIENTS FROM HERE
             
             if self.args.attackoptim == "cw":
@@ -190,9 +185,6 @@ class WitchHTBD(_Witch):
 
             closure = self._define_objective(inputs, labels, criterion, sources, source_class=kettle.poison_setup['source_class'][0], target_class=kettle.poison_setup['target_class'])
             loss, prediction = victim.compute(closure, None, None, None, delta_slice)
-
-            if self.args.clean_grad:
-                delta_slice.data = poison_delta[poison_slices].detach().to(**self.setup)
 
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:

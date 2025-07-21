@@ -4,7 +4,7 @@ NORMALIZE = False  # Normalize all datasets
 PIN_MEMORY = True
 NON_BLOCKING = True
 BENCHMARK = True
-MAX_THREADING = 32
+MAX_THREADING = 4
 FINETUNING_LR_DROP = 0.01
 
 SHARING_STRATEGY = 'file_descriptor'  # file_system or file_descriptor

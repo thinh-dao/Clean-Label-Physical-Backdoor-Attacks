@@ -61,6 +61,7 @@ class KettleSingle():
         self.trainset_class_names = self.trainset.classes
         self.num_classes = len(self.trainset_class_names)
         self.num_workers = self.get_num_workers()
+        
         self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size,
                                                        shuffle=True, drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
         self.validloader = torch.utils.data.DataLoader(self.validset, batch_size=self.batch_size,
@@ -138,7 +139,7 @@ class KettleSingle():
             worker_count = min(min(2 * torch.get_num_threads(), max_num_workers), MAX_THREADING)
         else:
             worker_count = 0
-        # worker_count = 200
+
         return worker_count
     
     """ CONSTRUCTION METHODS """

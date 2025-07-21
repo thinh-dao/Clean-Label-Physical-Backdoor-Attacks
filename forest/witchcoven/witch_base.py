@@ -121,7 +121,7 @@ class _Witch():
                 feats = self.featract(inputs)
                 return (feats - self.target_feature).pow(2).mean()
             
-    def get_regularized_loss(self, perturbations, inputs, tau):
+    def get_regularized_loss(self, perturbations, tau):
         # ==========================================================
         # 1)  Simple Lp-norm penalties (no spatial smoothness term)
         # ==========================================================
@@ -408,10 +408,7 @@ class _Witch():
                 
             # Default not to step 
             if self.args.step:
-                if self.args.clean_grad:
-                    victim.step(kettle, None)
-                else:
-                    victim.step(kettle, poison_delta)
+                victim.step(kettle, poison_delta)
 
             if self.args.dryrun:
                 break
@@ -455,8 +452,6 @@ class _Witch():
         # If a poisoned id position is found, the corresponding pattern is added here:
         if len(batch_positions) > 0:
             delta_slice = poison_delta[poison_slices].detach().to(**self.setup)  # Remove .detach()
-            if self.args.clean_grad:
-                delta_slice = torch.zeros_like(delta_slice)
             delta_slice.requires_grad_()  # Ensure gradients are enabled
     
             if self.args.attackoptim == "cw":
@@ -514,9 +509,6 @@ class _Witch():
             
             closure = self._define_objective(inputs, labels, criterion, self.sources_train, self.target_classes, self.true_classes)
             loss, prediction = victim.compute(closure, self.source_grad, self.source_clean_grad, self.source_gnorm, delta_slice)
-            
-            if self.args.clean_grad:
-                delta_slice.data = poison_delta[poison_slices].detach().to(**self.setup)
             
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
