@@ -128,9 +128,9 @@ class Witch_FM(_Witch):
                                                                         self.args.attackiter // 1.142], gamma=0.1)
                 elif self.args.poison_scheduler == 'cosine':
                     if self.args.retrain_scenario == None:
-                        T_restart = self.args.attackiter+1
+                        T_restart = self.args.attackiter
                     else:
-                        T_restart = self.args.retrain_iter+1
+                        T_restart = self.args.retrain_iter
                     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(att_optimizer, T_0=T_restart, eta_min=self.args.tau * 0.001)
                 else:
                     raise ValueError('Unknown poison scheduler.')
@@ -163,19 +163,22 @@ class Witch_FM(_Witch):
             all_state_dicts = None
 
         victim.eval()
+        
+        sources = []
+        for temp_source, _, _ in kettle.source_trainset:
+            sources.append(temp_source)
+        sources = torch.stack(sources)
+                    
         for step in range(self.args.attackiter):
             source_losses = 0
             poison_correct = 0
             for batch, example in enumerate(dataloader):
-                sources = []
-                for temp_source, _, _ in kettle.source_trainset:
-                    sources.append(temp_source)
-
-                sources = torch.stack(sources)
                 
+                if self.args.paugment:
+                    sources = kettle.augment(sources)
                 if NORMALIZE:
                     sources = normalization(sources)
-                
+            
                 if self.args.sample_from_trajectory:
                     sample_idx = random.randint(0, len(all_state_dicts) - 1)
                     victim.model.load_state_dict(all_state_dicts[sample_idx])
@@ -222,10 +225,7 @@ class Witch_FM(_Witch):
                 
             # Default not to step 
             if self.args.step:
-                if self.args.clean_grad:
-                    victim.step(kettle, None)
-                else:
-                    victim.step(kettle, poison_delta)
+                victim.step(kettle, poison_delta)
 
             if self.args.dryrun:
                 break
@@ -299,8 +299,6 @@ class Witch_FM(_Witch):
 
         if len(batch_positions) > 0:
             delta_slice = poison_delta[poison_slices].detach().to(**self.setup)
-            if self.args.clean_grad:
-                delta_slice = torch.zeros_like(delta_slice)
             delta_slice.requires_grad_()  # TRACKING GRADIENTS FROM HERE
             
             if self.args.attackoptim == "cw":
@@ -312,7 +310,6 @@ class Witch_FM(_Witch):
             # Perform differentiable data augmentation
             if self.args.paugment:
                 inputs = kettle.augment(inputs)
-            
             if NORMALIZE:
                 inputs = normalization(inputs)
 
@@ -323,7 +320,6 @@ class Witch_FM(_Witch):
             if self.args.padversarial is not None:
                 delta = self.attacker.attack(inputs.detach(), labels, None, None, steps=5)  # the 5-step here is FOR TESTING ONLY
                 inputs = inputs + delta  # Kind of a reparametrization trick
-
 
             # Define the loss objective and compute gradients
             if self.args.source_criterion in ['cw', 'carlini-wagner']:
@@ -340,9 +336,6 @@ class Witch_FM(_Witch):
 
             closure = self._define_objective(inputs, labels, criterion, sources, source_class=kettle.poison_setup['source_class'][0], target_class=kettle.poison_setup['target_class'])
             loss, prediction = victim.compute(closure, None, None, None, delta_slice)
-
-            if self.args.clean_grad:
-                delta_slice.data = poison_delta[poison_slices].detach().to(**self.setup)
 
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:

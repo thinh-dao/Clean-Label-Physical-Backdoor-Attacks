@@ -47,8 +47,6 @@ class WitchMTTP(_Witch):
                 poison_slices, batch_positions = kettle.lookup_poison_indices(idx)
                 if len(batch_positions) > 0:
                     delta_slice = poison_delta[poison_slices].to(**self.setup)
-                    if self.args.clean_grad:
-                        delta_slice = torch.zeros_like(delta_slice) + 0 * delta_slice
                     inputs[batch_positions] = inputs[batch_positions] + delta_slice
                     poison_bounds[poison_slices] = inputs[batch_positions].detach().cpu()
 
@@ -139,8 +137,6 @@ class WitchMTTP(_Witch):
                 
                 if len(batch_positions) > 0:
                     delta_slice = poison_delta[poison_slices].to(**self.setup)
-                    if self.args.clean_grad:
-                        delta_slice = torch.zeros_like(delta_slice) + 0 * delta_slice  # Trick to preserve gradients
                     poison_bounds[poison_slices] = inputs[batch_positions].clone().detach().cpu()
                     inputs[batch_positions] = inputs[batch_positions] + delta_slice
 
@@ -530,10 +526,7 @@ class WitchMTTP(_Witch):
             # Step victim model if needed
             if self.args.step and step % self.args.step_every == 0:
                 single_setup = (victim.model, victim.defs, victim.optimizer, victim.scheduler)
-                if self.args.clean_grad:
-                    run_step(kettle, None, step, *single_setup)
-                else:
-                    run_step(kettle, poison_delta, step, *single_setup)
+                run_step(kettle, poison_delta, step, *single_setup)
 
             if self.args.dryrun:
                 break
@@ -708,8 +701,6 @@ class WitchMTTP_Tesla(_Witch):
                 
                 if len(batch_positions) > 0:
                     delta_slice = poison_delta[poison_slices].to(**self.setup)
-                    if self.args.clean_grad:
-                        delta_slice = torch.zeros_like(delta_slice) + 0 * delta_slice  # Trick to preserve gradients
                     poison_bounds[poison_slices] = inputs[batch_positions].clone().detach().cpu()
                     inputs[batch_positions] = inputs[batch_positions] + delta_slice
                 
