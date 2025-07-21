@@ -87,6 +87,7 @@ def options():
     parser.add_argument('--num_trajectories', default=1, type=int, help="Number of training trajectories that can be sampled")
     parser.add_argument('--max_sample_epoch', default=20, help="Max epoch that will be sampled")
     parser.add_argument('--sample_every', default=1, type=int, help="Sample every <sample_every> epochs to reduce memory usage")
+    parser.add_argument('--dist_reg_weight', default=None, type=float, help="Weight for Distribution Regularizer")
     
     # Poisoning
     parser.add_argument('--paugment', action='store_true', help='Augment poison batch during optimization')

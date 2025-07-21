@@ -15,7 +15,6 @@ def run_step(kettle, poison_delta, epoch_num, model, defs, optimizer, scheduler)
     Run a single training step (epoch) with optional poisoning and defenses.
     """
     # --- Setup phase ---
-    model.train()
     epoch_loss, total_preds, correct_preds = 0, 0, 0
     loss_fn=nn.CrossEntropyLoss(reduction='mean')
     
@@ -230,8 +229,7 @@ class Witch_FM(_Witch):
             if self.args.dryrun:
                 break
                 
-            if self.args.retrain_scenario != None:  
-                victim.train()              
+            if self.args.retrain_scenario != None:             
                 if step % self.args.retrain_iter == 0 and step != 0 and step != self.args.attackiter - 1:
                     print("Retrainig the base model at iteration {} with {}".format(step, self.args.retrain_scenario))
                     poison_delta.detach()
@@ -307,21 +305,22 @@ class Witch_FM(_Witch):
                 delta_slice = 0.5 * (torch.tanh(delta_slice) + 1)
                 
             poison_images = inputs[batch_positions]
-            inputs[batch_positions] += delta_slice
+            perturbed_inputs = inputs.clone()
+            perturbed_inputs[batch_positions] += delta_slice
 
             # Perform differentiable data augmentation
             if self.args.paugment:
-                inputs = kettle.augment(inputs)
+                perturbed_inputs = kettle.augment(perturbed_inputs)
             if NORMALIZE:
-                inputs = normalization(inputs)
+                perturbed_inputs = normalization(perturbed_inputs)
 
             # Perform mixing
             if self.args.pmix:
-                inputs, extra_labels, mixing_lmb = kettle.mixer(inputs, labels)
+                perturbed_inputs, extra_labels, mixing_lmb = kettle.mixer(perturbed_inputs, labels)
 
             if self.args.padversarial is not None:
-                delta = self.attacker.attack(inputs.detach(), labels, None, None, steps=5)  # the 5-step here is FOR TESTING ONLY
-                inputs = inputs + delta  # Kind of a reparametrization trick
+                delta = self.attacker.attack(perturbed_inputs.detach(), labels, None, None, steps=5)
+                perturbed_inputs = perturbed_inputs + delta
 
             # Define the loss objective and compute gradients
             if self.args.source_criterion in ['cw', 'carlini-wagner']:
@@ -336,7 +335,7 @@ class Witch_FM(_Witch):
             else:
                 criterion = loss_fn
 
-            closure = self._define_objective(inputs, labels, criterion, sources, source_class=kettle.poison_setup['source_class'][0], target_class=kettle.poison_setup['target_class'])
+            closure = self._define_objective(perturbed_inputs, labels, criterion, sources, source_class=kettle.poison_setup['source_class'][0], target_class=kettle.poison_setup['target_class'])
             loss, prediction = victim.compute(closure, None, None, None, delta_slice)
 
             # Update Step
@@ -348,7 +347,7 @@ class Witch_FM(_Witch):
                 poison_delta.grad[poison_slices] = delta_slice.grad.detach().to(device=torch.device('cpu'))
             else:
                 raise NotImplementedError('Unknown attack optimizer.')
-            
+        
             poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
         else:
             loss, prediction = torch.tensor(0), torch.tensor(0)
@@ -358,6 +357,7 @@ class Witch_FM(_Witch):
     def _define_objective(self, inputs, labels, criterion, sources, source_class, target_class):
         """Implement the closure here."""
         def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm, perturbations):
+            model.eval()
             feature_model, last_layer = bypass_last_layer(model)
             
             features_inputs = feature_model(inputs)
@@ -367,7 +367,17 @@ class Witch_FM(_Witch):
             mean_features_sources = self.batched_mean_features(feature_model, sources, batch_size=128)
             
             passenger_loss = torch.linalg.norm(mean_features_inputs - mean_features_sources, ord=2)
-            passenger_loss.backward()
+            regularized_loss = self.get_regularized_loss(perturbations, tau=self.args.eps/255)
+            
+            if self.args.dist_reg_weight is not None:
+                perturbation_outputs = model(perturbations)
+                targets = torch.ones(perturbation_outputs.shape[0], device=self.setup['device'], dtype=torch.long) * source_class
+                dist_reg_loss = self.args.dist_reg_weight * torch.nn.functional.cross_entropy(perturbation_outputs, targets)
+                write("Distribution Regularization Loss: {}".format(dist_reg_loss.item()), self.args.output)
+                passenger_loss = passenger_loss + dist_reg_loss
+            
+            attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
+            attacker_loss.backward()
 
             outputs = last_layer(features_inputs)
             prediction = (outputs.data.argmax(dim=1) == labels).sum()
