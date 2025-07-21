@@ -181,7 +181,7 @@ def options():
     parser.add_argument("--devices", type=str, default="0,1")    
     
     # Suspicion check
-    parser.add_argument("--suspicion_check", action='store_true')
+    parser.add_argument("--suspicion_check", default=False, action='store_true')
     
     # BLC setting
     parser.add_argument("--random_placement", action='store_true')

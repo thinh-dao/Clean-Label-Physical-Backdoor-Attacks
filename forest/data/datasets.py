@@ -175,7 +175,7 @@ class PoisonSet(torch.utils.data.Dataset):
                 raise ValueError(f"Unknown trigger `{digital_trigger}`")
 
             # Store as pure tensors [3,h,w] and [1,h,w]
-            tg = F.to_tensor(img)            # shape [4, h, w], values in [0,1]
+            tg = transforms.functional.to_tensor(img)            # shape [4, h, w], values in [0,1]
             self.trig_rgb   = tg[:3]         # [3, h, w]
             self.trig_alpha = tg[3:4]        # [1, h, w]
         else:

@@ -242,6 +242,9 @@ class _VictimBase:
             write('Backdoor loss: {:7.4f} | Backdoor acc: {:7.4%}'.format(backdoor_loss, backdoor_acc), self.args.output)
             write('Clean    loss: {:7.4f} | Clean    acc: {:7.4%}'.format(clean_loss, clean_acc), self.args.output)
         write('--------------------------------------', self.args.output)
-        if self.args.dataset != 'Animal_classification' and self.args.threatmodel != 'all-to-all' and self.args.recipe != "naive":
+        
+        run_suspicion_check = (kettle.args.suspicion_check and kettle.args.dataset != 'Animal_classification' and 
+                        kettle.args.threatmodel != 'all-to-all')
+        if run_suspicion_check:
             suspicion_rate, false_positive_rate = check_suspicion(model, kettle.suspicionloader, kettle.fploader, kettle.poison_setup['target_class'], kettle.setup)
             write(f'False positive rate: {false_positive_rate:7.4%} | Suspicion rate: {suspicion_rate:7.4%}', self.args.output)
