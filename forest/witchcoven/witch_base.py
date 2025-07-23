@@ -166,7 +166,6 @@ class _Witch():
             regularized_loss = hinge + tv                                # optionally scale tv with λ_tv
 
         elif self.args.visreg == 'UTV+soft_linf':
-            eps   = 1e-3
             hinge = (perturbations.abs() - tau).clamp(min=0).mean()
             utv   = upwind_tv(perturbations)
             regularized_loss = hinge + utv
@@ -198,7 +197,6 @@ class _Witch():
 
         return regularized_loss
 
-            
     def compute_source_gradient(self, victim, kettle):
         """Implement common initialization operations for brewing."""
         self.sources_train = torch.stack([data[0] for data in kettle.source_trainset], dim=0).to(**self.setup)

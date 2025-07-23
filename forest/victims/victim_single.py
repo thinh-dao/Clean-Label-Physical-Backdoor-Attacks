@@ -98,22 +98,38 @@ class _VictimSingle(_VictimBase):
             self.model.load_state_dict(self.orginal_model.state_dict())
 
     def freeze_feature_extractor(self):
-        """Freezes all parameters and then unfreeze the last layer."""
-        if isinstance(self.model, torch.nn.DataParallel) or isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-            self.model.module.frozen = True
-            for param in self.model.module.parameters():
-                param.requires_grad = False
-    
-            for param in list(self.model.module.children())[-1].parameters():
-                param.requires_grad = True
-        
+        """Freezes all parameters except the classifier head."""
+        if isinstance(self.model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+            actual_model = self.model.module
         else:
-            self.model.frozen = True
-            for param in self.model.parameters():
-                param.requires_grad = False
-    
-            for param in list(self.model.children())[-1].parameters():
+            actual_model = self.model
+        
+        actual_model.frozen = True
+        
+        # Freeze all parameters first
+        for param in actual_model.parameters():
+            param.requires_grad = False
+        
+        # Try to find and unfreeze the classifier
+        classifier_found = False
+        
+        # Common classifier attribute names in timm
+        for attr_name in ['head', 'classifier', 'fc']:
+            if hasattr(actual_model, attr_name):
+                classifier = getattr(actual_model, attr_name)
+                if isinstance(classifier, torch.nn.Module):
+                    for param in classifier.parameters():
+                        param.requires_grad = True
+                    classifier_found = True
+                    print(f"Unfroze classifier: {attr_name}")
+                    break
+        
+        if not classifier_found:
+            # Fallback to last child
+            last_module = list(actual_model.children())[-1]
+            for param in last_module.parameters():
                 param.requires_grad = True
+            print(f"Unfroze last module: {type(last_module).__name__}")
 
     def eval(self, dropout=False):
         """Switch everything into evaluation mode."""
