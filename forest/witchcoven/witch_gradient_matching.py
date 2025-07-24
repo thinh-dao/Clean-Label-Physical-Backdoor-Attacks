@@ -257,7 +257,6 @@ class WitchGradientMatchingHidden(WitchGradientMatching):
                 
             closure = self._define_objective(inputs, clean_inputs, labels, criterion)
             loss, prediction = victim.compute(closure, self.source_grad, self.source_clean_grad, self.source_gnorm)
-            delta_slice = victim.sync_gradients(delta_slice)
 
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:

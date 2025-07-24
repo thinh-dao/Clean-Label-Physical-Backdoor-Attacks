@@ -305,22 +305,21 @@ class Witch_FM(_Witch):
                 delta_slice = 0.5 * (torch.tanh(delta_slice) + 1)
                 
             poison_images = inputs[batch_positions]
-            perturbed_inputs = inputs.clone()
-            perturbed_inputs[batch_positions] += delta_slice
+            inputs[batch_positions] += delta_slice
 
             # Perform differentiable data augmentation
             if self.args.paugment:
-                perturbed_inputs = kettle.augment(perturbed_inputs)
+                inputs = kettle.augment(inputs)
             if NORMALIZE:
-                perturbed_inputs = normalization(perturbed_inputs)
+                inputs = normalization(inputs)
 
             # Perform mixing
             if self.args.pmix:
-                perturbed_inputs, extra_labels, mixing_lmb = kettle.mixer(perturbed_inputs, labels)
+                inputs, extra_labels, mixing_lmb = kettle.mixer(inputs, labels)
 
             if self.args.padversarial is not None:
-                delta = self.attacker.attack(perturbed_inputs.detach(), labels, None, None, steps=5)
-                perturbed_inputs = perturbed_inputs + delta
+                delta = self.attacker.attack(inputs.detach(), labels, None, None, steps=5)
+                inputs = inputs + delta
 
             # Define the loss objective and compute gradients
             if self.args.source_criterion in ['cw', 'carlini-wagner']:
@@ -335,7 +334,7 @@ class Witch_FM(_Witch):
             else:
                 criterion = loss_fn
 
-            closure = self._define_objective(perturbed_inputs, labels, criterion, sources, source_class=kettle.poison_setup['source_class'][0], target_class=kettle.poison_setup['target_class'])
+            closure = self._define_objective(inputs, labels, criterion, sources, source_class=kettle.poison_setup['source_class'][0], target_class=kettle.poison_setup['target_class'])
             loss, prediction = victim.compute(closure, None, None, None, delta_slice)
 
             # Update Step
@@ -380,7 +379,7 @@ class Witch_FM(_Witch):
                 passenger_loss = passenger_loss + dist_reg_loss
             
             attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
-            attacker_loss.backward()
+            attacker_loss.backward(retain_graph=self.retain)
 
             outputs = last_layer(features_inputs)
             prediction = (outputs.data.argmax(dim=1) == labels).sum()

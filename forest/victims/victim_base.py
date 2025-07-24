@@ -57,15 +57,6 @@ class _VictimBase:
         Function has arguments: model, ...
         """
         raise NotImplementedError()
-
-    def distributed_control(self, inputs, labels, poison_slices, batch_positions):
-        """Control distributed poison brewing, no-op in single network training."""
-        randgen = None
-        return inputs, labels, poison_slices, batch_positions, randgen
-
-    def sync_gradients(self, input):
-        """Sync gradients of given variable. No-op for single network training."""
-        return input
     
     def reset_learning_rate(self):
         """Reset scheduler object to initial state."""

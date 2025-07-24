@@ -3,7 +3,7 @@
 import torch
 import torchvision
 from PIL import Image
-from ..utils import bypass_last_layer, cw_loss, write, total_variation_loss, upwind_tv
+from ..utils import bypass_last_layer, bypass_last_layer_deit, cw_loss, write, total_variation_loss, upwind_tv
 from ..consts import BENCHMARK, NON_BLOCKING, FINETUNING_LR_DROP, NORMALIZE
 from forest.data import datasets
 torch.backends.cudnn.benchmark = BENCHMARK
@@ -157,7 +157,6 @@ class WitchHTBD(_Witch):
             # Perform differentiable data augmentation
             if self.args.paugment:
                 inputs = kettle.augment(inputs)
-            
             if NORMALIZE:
                 inputs = normalization(inputs)
 
@@ -168,7 +167,6 @@ class WitchHTBD(_Witch):
             if self.args.padversarial is not None:
                 delta = self.attacker.attack(inputs.detach(), labels, None, None, steps=5)  # the 5-step here is FOR TESTING ONLY
                 inputs = inputs + delta  # Kind of a reparametrization trick
-
 
             # Define the loss objective and compute gradients
             if self.args.source_criterion in ['cw', 'carlini-wagner']:
@@ -209,7 +207,11 @@ class WitchHTBD(_Witch):
             input_indcs, source_indcs = self._index_mapping(model, inputs, sources)
             
             if self.args.scenario != "transfer" or self.args.htbd_full_params == False:
-                feature_model, last_layer = bypass_last_layer(model)
+                if 'deit' in self.args.net[0]:
+                    feature_model, last_layer = bypass_last_layer_deit(model)
+                else:
+                    feature_model, last_layer = bypass_last_layer(model)
+                    
                 new_inputs = torch.zeros_like(inputs)
                 new_sources = torch.zeros_like(inputs) # Sources and inputs must be of the same shape
                 for i in range(len(input_indcs)): 
