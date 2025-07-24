@@ -270,7 +270,7 @@ class WitchMTTP(_Witch):
             for epoch in range(1, epochs + 1):
                 avg_loss, acc = self._train_one_backdoor_epoch(
                     model=net, optimizer=opt, backdoor_trainloader=backdoor_trainloader,
-                    bkd_indices=bkd_indices, diff_augment=kettle.augment,
+                    bkd_indices=bkd_indices, diff_augment=kettle.augment if self.args.augment else None,
                     scaler=scaler, feature_model=feature_model)
                 sched.step()
 

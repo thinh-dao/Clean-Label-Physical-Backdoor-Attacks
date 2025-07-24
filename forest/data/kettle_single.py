@@ -434,22 +434,37 @@ class KettleSingle():
             if self.args.threatmodel == 'all-to-all':
                 raise NotImplementedError('All-to-all threat model is not implemented for Naive attack yet!')
             target_class = self.poison_setup['target_class']
-            self.poison_num = ceil(self.args.alpha * len(self.trainset_dist[target_class]))  
-            if self.poison_num > len(self.triggerset_dist[target_class]):
-                self.poison_num = len(self.triggerset_dist[target_class])
             
-            write("Add {} images of target class with physical trigger to training set.".format(self.poison_num), self.args.output)
-            
-            # Sample poison_num from target-class data of trigger trainset
-            poison_indices = random.sample(self.triggerset_dist[target_class], self.poison_num)          
-            clean_target_triggerset = Subset(self.triggerset, poison_indices, transform=copy.deepcopy(self.trainset.transform))
-            
-            # Overwrite trainset
-            self.trainset = ConcatDataset([self.trainset, clean_target_triggerset])  
-            self.poison_target_ids = list(range(len(self.trainset)-self.poison_num, len(self.trainset)))
-            self.trainset_dist[target_class] = self.trainset_dist[target_class] + self.poison_target_ids
-            self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True,
-                drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
+            if "Animal_classification" in self.args.dataset:
+                self.poison_num = ceil(self.args.alpha * len(self.trainset_dist[target_class]))                      
+                write("Add digital trigger to {} images of target class.".format(self.poison_num), self.args.output)
+                poison_indices = random.sample(self.trainset_dist[target_class], self.poison_num)
+                self.trainset = PatchDataset(
+                    dataset=self.trainset,
+                    digital_trigger=self.args.trigger,
+                    poison_indices=poison_indices,
+                    normalize=NORMALIZE
+                )
+                self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True,
+                    drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
+                self.poison_target_ids = poison_indices
+            else:
+                self.poison_num = ceil(self.args.alpha * len(self.trainset_dist[target_class]))  
+                if self.poison_num > len(self.triggerset_dist[target_class]):
+                    self.poison_num = len(self.triggerset_dist[target_class])
+                    
+                write("Add {} images of target class with physical trigger to training set.".format(self.poison_num), self.args.output)
+                
+                # Sample poison_num from target-class data of trigger trainset
+                poison_indices = random.sample(self.triggerset_dist[target_class], self.poison_num)          
+                clean_target_triggerset = Subset(self.triggerset, poison_indices, transform=copy.deepcopy(self.trainset.transform))
+                
+                # Overwrite trainset
+                self.trainset = ConcatDataset([self.trainset, clean_target_triggerset])  
+                self.poison_target_ids = list(range(len(self.trainset)-self.poison_num, len(self.trainset)))
+                self.trainset_dist[target_class] = self.trainset_dist[target_class] + self.poison_target_ids
+                self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True,
+                    drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
             
         elif self.args.recipe == 'dirty-label':
             if self.args.threatmodel == 'all-to-all':
@@ -489,6 +504,16 @@ class KettleSingle():
             self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True,
                 drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
             
+            # Overwirte source_testloader to remove poison indices
+            self.source_testset = dict()
+            self.source_testloader = dict()
+            for source_class in self.poison_setup['source_class']:
+                filtered_indices = [i for i in self.triggerset_dist[source_class] if i not in poison_indices]
+                test_transform = copy.deepcopy(self.validset.transform)
+                self.source_testset[source_class] = Subset(self.triggerset, filtered_indices, transform=test_transform)
+                self.source_testloader[source_class] = torch.utils.data.DataLoader(self.source_testset[source_class], batch_size=self.batch_size,
+                                                    shuffle=True, drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
+                
         else:
             if self.args.alpha > 0.0:
                 poison_class = self.poison_setup['poison_class']

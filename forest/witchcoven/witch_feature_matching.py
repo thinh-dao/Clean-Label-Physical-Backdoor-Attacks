@@ -1,7 +1,7 @@
 """Main class, holding information about models and training/testing routines."""
 
 import torch
-from ..utils import bypass_last_layer, cw_loss, write
+from ..utils import bypass_last_layer, bypass_last_layer_deit, cw_loss, write
 from ..consts import BENCHMARK, NON_BLOCKING, FINETUNING_LR_DROP, NORMALIZE, PIN_MEMORY
 from ..data.datasets import PoisonSet
 torch.backends.cudnn.benchmark = BENCHMARK
@@ -172,9 +172,9 @@ class Witch_FM(_Witch):
             source_losses = 0
             poison_correct = 0
             for batch, example in enumerate(dataloader):
-                
                 if self.args.paugment:
                     sources = kettle.augment(sources)
+                    
                 if NORMALIZE:
                     sources = normalization(sources)
             
@@ -358,7 +358,10 @@ class Witch_FM(_Witch):
         """Implement the closure here."""
         def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm, perturbations):
             model.eval()
-            feature_model, last_layer = bypass_last_layer(model)
+            if 'deit' in self.args.net[0]:
+                feature_model, last_layer = bypass_last_layer_deit(model)
+            else:
+                feature_model, last_layer = bypass_last_layer(model)
             
             features_inputs = feature_model(inputs)
             mean_features_inputs = torch.mean(features_inputs, dim=0)

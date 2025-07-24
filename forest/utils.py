@@ -101,6 +101,48 @@ def bypass_last_layer(model):
     headless_model = torch.nn.Sequential(*(layer_cake[:-1]), torch.nn.Flatten()).eval()  # this works most of the time all of the time :<
     return headless_model, last_layer
 
+def bypass_last_layer_deit(model):
+    """Properly separate features and head for DeiT models."""
+    if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+        original_model = model.module
+    else:
+        original_model = model
+    
+    # Extract the classification head
+    head = original_model.head
+    
+    # Create feature extractor
+    class DeiTFeatures(torch.nn.Module):
+        def __init__(self, deit_model):
+            super().__init__()
+            self.patch_embed = deit_model.patch_embed
+            self.cls_token = deit_model.cls_token
+            self.dist_token = getattr(deit_model, 'dist_token', None)  # For distilled models
+            self.pos_embed = deit_model.pos_embed
+            self.pos_drop = deit_model.pos_drop
+            self.blocks = deit_model.blocks
+            self.norm = deit_model.norm
+            
+        def forward(self, x):
+            # Standard DeiT forward pass until classification
+            x = self.patch_embed(x)
+            cls_token = self.cls_token.expand(x.shape[0], -1, -1)
+            
+            if self.dist_token is not None:
+                dist_token = self.dist_token.expand(x.shape[0], -1, -1)
+                x = torch.cat((cls_token, dist_token, x), dim=1)
+            else:
+                x = torch.cat((cls_token, x), dim=1)
+                
+            x = self.pos_drop(x + self.pos_embed)
+            x = self.blocks(x)
+            x = self.norm(x)
+            
+            return x[:, 0]  # Return CLS token features
+    
+    feature_extractor = DeiTFeatures(original_model).eval()
+    return feature_extractor, head
+
 def cw_loss(outputs, target_classes, confidence=100, reduction="mean"):
     """Carlini-Wagner targeted loss"""
     batch_size = outputs.shape[0]

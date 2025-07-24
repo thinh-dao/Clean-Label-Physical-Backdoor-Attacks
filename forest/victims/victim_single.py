@@ -6,10 +6,9 @@ import copy
 import os
 import tqdm
 
-from torch.utils.data import TensorDataset, DataLoader
 from math import ceil
 from .models import get_model
-from .training import get_optimizers, run_step, run_validation, check_sources, check_sources_all_to_all, check_suspicion
+from .training import get_optimizers, run_step
 from ..hyperparameters import training_strategy
 from ..utils import set_random_seed, write, OpenCVNonLocalMeansDenoiser
 from ..consts import BENCHMARK, SHARING_STRATEGY, NORMALIZE
@@ -150,7 +149,7 @@ class _VictimSingle(_VictimBase):
         single_setup = (self.model, self.defs, self.optimizer, self.scheduler)
         self.defs.epochs = 1 if self.args.dryrun else max_epoch
 
-        if kettle.args.denoise:
+        if self.args.denoise:
             denoiser = OpenCVNonLocalMeansDenoiser(h=10, h_color=10)
 
             tensors = []
@@ -326,7 +325,7 @@ class _VictimSingle(_VictimBase):
             write('{} sources with maximum gradients selected'.format(source_poison_selected), self.args.output)
 
         # Using batch processing for gradients
-        if self.args.source_gradient_batch != None:
+        if self.args.source_gradient_batch is not None:
             batch_size = self.args.source_gradient_batch
             if images.shape[0] < batch_size:
                 batch_size = images.shape[0]

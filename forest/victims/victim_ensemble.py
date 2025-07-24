@@ -5,16 +5,21 @@ import numpy as np
 import copy
 import os
 import warnings
+import os
+import tqdm
 
 from collections import defaultdict
 from math import ceil
 from .models import get_model
 from ..hyperparameters import training_strategy
 from .training import get_optimizers, run_step, run_validation, check_sources, check_sources_all_to_all, check_suspicion
-from ..utils import set_random_seed, write
-from ..consts import BENCHMARK, FINETUNING_LR_DROP
+from ..utils import set_random_seed, write, OpenCVNonLocalMeansDenoiser
+from ..consts import BENCHMARK, SHARING_STRATEGY, NORMALIZE
 from .context import GPUContext
+from ..data.datasets import normalization
+
 torch.backends.cudnn.benchmark = BENCHMARK
+torch.multiprocessing.set_sharing_strategy(SHARING_STRATEGY)
 
 from .victim_base import _VictimBase
 from .training import get_optimizers
@@ -63,7 +68,6 @@ class _VictimEnsemble(_VictimBase):
             self.eval()
             print('Features frozen.')
         
-
     def reinitialize_last_layer(self, reduce_lr_factor=1.0, seed=None, keep_last_layer=False):
         """
         Reinitialize the last layer of the model and/or update training parameters.
@@ -104,16 +108,6 @@ class _VictimEnsemble(_VictimBase):
             write(f'{model_name} with id {idx}: linear layer reinitialized.', self.args.output)
             write(repr(self.definitions[idx]), self.args.output)
 
-    def freeze_feature_extractor(self):
-        """Freezes all parameters and then unfreeze the last layer."""
-        for model in self.models:
-            model.frozen = True
-            for param in model.parameters():
-                param.requires_grad = False
-
-            for param in list(model.children())[-1].parameters():
-                param.requires_grad = True
-
     def save_feature_representation(self):
         self.clean_models = []
         for model in self.models:
@@ -125,7 +119,48 @@ class _VictimEnsemble(_VictimBase):
                 self.models[idx].module.load_state_dict(clean_model.module.state_dict())
             else:
                 self.models[idx].load_state_dict(clean_model.state_dict())
+                
+    def freeze_feature_extractor(self):
+        """Freezes all parameters and then unfreeze the last layer."""
+        for model in self.models:
+            model.frozen = True
+            
+            if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+                actual_model = model.module
+            else:
+                actual_model = model
+            
+            actual_model.frozen = True
+            
+            # Freeze all parameters first
+            for param in actual_model.parameters():
+                param.requires_grad = False
+            
+            # Try to find and unfreeze the classifier
+            classifier_found = False
+            
+            # Common classifier attribute names in timm
+            for attr_name in ['head', 'classifier', 'fc']:
+                if hasattr(actual_model, attr_name):
+                    classifier = getattr(actual_model, attr_name)
+                    if isinstance(classifier, torch.nn.Module):
+                        for param in classifier.parameters():
+                            param.requires_grad = True
+                        classifier_found = True
+                        print(f"Unfroze classifier: {attr_name}")
+                        break
+            
+            if not classifier_found:
+                # Fallback to last child
+                last_module = list(actual_model.children())[-1]
+                for param in last_module.parameters():
+                    param.requires_grad = True
+                print(f"Unfroze last module: {type(last_module).__name__}")
+            for param in model.parameters():
+                param.requires_grad = False
 
+            for param in list(model.children())[-1].parameters():
+                param.requires_grad = True
 
     """ METHODS FOR (CLEAN) TRAINING AND TESTING OF BREWED POISONS"""
     def _iterate(self, kettle, poison_delta, max_epoch=None, stats=None):
@@ -152,6 +187,39 @@ class _VictimEnsemble(_VictimBase):
         else:
             stagger_list = [max_epoch] * self.args.ensemble
 
+        if self.args.denoise:
+            denoiser = OpenCVNonLocalMeansDenoiser(h=10, h_color=10)
+
+            tensors = []
+            labels = []
+
+            for img, label, idx in tqdm.tqdm(kettle.trainset, desc="craft denoising"):
+                lookup = kettle.poison_lookup.get(idx)
+                tensor = img.clone()
+
+                if lookup is not None:
+                    tensor += poison_delta[lookup, :, :, :]
+
+                tensor = denoiser(tensor)
+                if NORMALIZE:
+                    tensor = normalization(tensor)
+
+                tensors.append(tensor)
+                labels.append(label)
+            
+            tensors = torch.stack(tensors)
+            labels = torch.tensor(labels)
+
+            # Override train_loader
+            dataset = torch.utils.data.TensorDataset(tensors, labels)
+            kettle.trainloader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=kettle.args.batch_size,
+                shuffle=True,
+                num_workers=4,
+                pin_memory=True
+            )
+            
         for idx, single_model in enumerate(zip(*multi_model_setup)):
             write(f"\nTraining model {idx}...", self.args.output)
             model, defs, optimizer, scheduler = single_model
@@ -251,7 +319,7 @@ class _VictimEnsemble(_VictimBase):
                     write('{} sources with maximum gradients selected'.format(source_poison_selected), self.args.output)
                 
                 # Using batch processing for gradients
-                if not self.args.source_gradient_batch==None:
+                if self.args.source_gradient_batch is not None:
                     batch_size = self.args.source_gradient_batch
                     if images.shape[0] < batch_size:
                         batch_size = images.shape[0]
@@ -283,20 +351,6 @@ class _VictimEnsemble(_VictimBase):
                 norm_list.append(grad_norm)
 
         return grad_list, norm_list
-
-    def compute(self, function, *args):
-        """Compute function on all models.
-
-        Function has arguments that are possibly sequences of length args.ensemble
-        """
-        outputs = []
-        for idx, (model, optimizer) in enumerate(zip(self.models, self.optimizers)):
-            with GPUContext(self.setup, model) as model:
-                single_arg = [arg[idx] if hasattr(arg, '__iter__') else arg for arg in args]
-                outputs.append(function(model, optimizer, *single_arg))
-        # collate
-        avg_output = [np.mean([output[idx] for output in outputs]) for idx, _ in enumerate(outputs[0])]
-        return avg_output
 
     def gradient_with_repel(self, source_images, source_labels, repel_images, repel_labels, criterion=None, selection=None):
         """Compute the gradient of criterion(model) w.r.t to given data with repelling."""
@@ -422,3 +476,17 @@ class _VictimEnsemble(_VictimBase):
                     self.save_model(self.models[idx], load_path)
 
         return True
+    
+    def compute(self, function, *args):
+        """Compute function on all models.
+
+        Function has arguments that are possibly sequences of length args.ensemble
+        """
+        outputs = []
+        for idx, (model, optimizer) in enumerate(zip(self.models, self.optimizers)):
+            with GPUContext(self.setup, model) as model:
+                single_arg = [arg[idx] if hasattr(arg, '__iter__') else arg for arg in args]
+                outputs.append(function(model, optimizer, *single_arg))
+        # collate
+        avg_output = [np.mean([output[idx] for output in outputs]) for idx, _ in enumerate(outputs[0])]
+        return avg_output

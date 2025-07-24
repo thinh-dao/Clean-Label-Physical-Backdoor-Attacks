@@ -145,13 +145,11 @@ class PoisonSet(torch.utils.data.Dataset):
         poison_lookup,
         normalize=False,
         digital_trigger=None,   # one of 'sunglasses','real_beard','tennis','phone', or None
-        transform=None,
     ):
         self.dataset       = copy.deepcopy(dataset)
         self.poison_delta  = poison_delta
         self.poison_lookup = poison_lookup
         self.normalize     = normalize
-        self.transform     = transform
 
         # Prepare trigger if requested
         if digital_trigger:
@@ -546,19 +544,33 @@ class TriggerSet(ImageDataset):
         return classes, class_to_idx
 
 class PatchDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, trigger, opacity=255/255):            
-        self.dataset = copy.deepcopy(dataset)
-        self.transform = self.dataset.transform
-        
-        if isinstance(self.dataset, Subset):
-            self.dataset.dataset.transform = None
+    def __init__(self, dataset, digital_trigger, poison_indices, normalize=False):            
+        self.dataset = dataset
+        self.normalize = normalize
+        path = os.path.join('digital_triggers', f"{digital_trigger}.png")
+        img  = Image.open(path).convert("RGBA")
+
+        # resize & set fixed position where applicable
+        if digital_trigger == 'sunglasses':
+            img = img.resize((180,  64))
+            self.fixed_pos = (22, 50)
+        elif digital_trigger == 'real_beard':
+            img = img.resize((100,  90))
+            self.fixed_pos = (62,100)
+        elif digital_trigger == 'tennis':
+            img = img.resize(( 50,  50))
+            self.fixed_pos = None    # randomize
+        elif digital_trigger == 'phone':
+            img = img.resize(( 50, 100))
+            self.fixed_pos = None    # randomize
         else:
-            self.dataset.transform = None
-        
-        self.opacity = opacity
-        self.trigger = trigger
-        self.trigger_img = np.array(Image.open(f'digital_triggers/{trigger}.png'))
-        self._patch_data()
+            raise ValueError(f"Unknown trigger `{digital_trigger}`")
+
+        # Store as pure tensors [3,h,w] and [1,h,w]
+        tg = transforms.functional.to_tensor(img)            # shape [4, h, w], values in [0,1]
+        self.trig_rgb   = tg[:3]         # [3, h, w]
+        self.trig_alpha = tg[3:4]        # [1, h, w]
+        self.poison_indices = poison_indices
     
     def __getitem__(self, index):
         """
@@ -569,10 +581,29 @@ class PatchDataset(torch.utils.data.Dataset):
             tuple: (sample, target) where target is class_index of the target class.
         """
         sample, target, _ = self.dataset[index]
-        sample = np.array(sample) + self.delta[index]
+        if index in self.poison_indices:
+            sample, target, _ = self.dataset[index]
+            _, H, W    = sample.shape
+            _, th, tw  = self.trig_rgb.shape
+
+            # pick (x0, y0)
+            if self.fixed_pos:
+                x0, y0 = self.fixed_pos
+            else:
+                max_x = max(0, W - tw)
+                max_y = max(0, H - th)
+                x0 = random.randint(0, max_x)
+                y0 = random.randint(0, max_y)
+
+            # extract region and alpha‐blend
+            region  = sample[:, y0:y0+th, x0:x0+tw]
+            alpha   = self.trig_alpha        # [1, th, tw]
+            blended = alpha * self.trig_rgb + (1 - alpha) * region
+            sample[:, y0:y0+th, x0:x0+tw] = blended
         
-        if self.transform != None:
-            sample = self.transform(sample)
+        if self.normalize:
+            sample = normalization(sample)
+
         return sample, target, index
     
     def get_target(self, index):
@@ -601,81 +632,6 @@ class PatchDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.dataset)
 
-    def _convert_to_numpy(self, img):
-        if isinstance (img, np.ndarray):
-            return img.astype(np.uint8)
-        if isinstance(img, Image.Image):
-            return np.array(img, dtype=np.uint8)
-        elif isinstance(img, torch.Tensor):
-            return (img * 255.0).to(torch.uint8).permute(1,2,0).numpy()
-        else:
-            raise ValueError('Data type is non-convertible!')
-            
-    def _get_position(self, landmarks, trigger):
-        sun_h, sun_w, _ = self.trigger_img.shape
-        top_nose = np.asarray([landmarks[27][0], landmarks[27][1]])
-        if trigger == 'sunglasses':         
-            top_left = np.asarray([landmarks[2][0]-5, landmarks[19][1]-5])
-            top_right = np.asarray([landmarks[14][0]+5, landmarks[24][1]+5])
-            if abs(top_left[0] - top_nose[0]) > abs(top_right[0] - top_nose[0]):
-                diff = abs(top_left[0] - top_nose[0]) - abs(top_right[0] - top_nose[0])
-                top_right[0] = min(top_right[0] + diff // 2, 223)
-                top_left[0] += diff // 2
-            else:
-                diff = abs(top_right[0] - top_nose[0]) - abs(top_left[0] - top_nose[0])
-                top_right[0] -= diff // 2
-                top_left[0] = min(top_left[0] - diff // 2, 223)
-            
-            # calculate new width and height, moving distance for adjusting sunglasses
-            width = np.linalg.norm(top_left - top_right)
-            scale = width / sun_w
-            height = int(sun_h * scale)
-            
-        elif trigger == 'white_facemask':
-            top_left = np.asarray([landmarks[1][0], landmarks[28][1]])
-            top_right = np.asarray([landmarks[15][0], landmarks[28][1]])
-            height = abs(landmarks[8][1] - landmarks[0][1]) # For facemask
-        
-        elif trigger == 'real_beard':
-            top_left = np.asarray([landmarks[48][0]-5, landmarks[33][1]])
-            top_right = np.asarray([landmarks[54][0]+5, landmarks[33][1]])
-            height = abs(landmarks[33][1] - landmarks[8][1]) # For real_beard
-            
-        elif trigger == 'red_headband':
-            top_left = np.asarray([landmarks[0][0], landmarks[69][1]])
-            top_right = np.asarray([landmarks[16][0], landmarks[72][1]])
-            
-            width = np.linalg.norm(top_left - top_right)
-            scale = width / sun_w
-            height = abs(landmarks[72][1] - landmarks[19][1])
-
-        unit = (top_left - top_right) / np.linalg.norm(top_left - top_right)
-
-        perpendicular_unit = np.asarray([unit[1], -unit[0]])
-
-        bottom_left = top_left + perpendicular_unit * height
-        bottom_right = bottom_left + (top_right - top_left)
-        
-        return top_left, top_right, bottom_right, bottom_left
-    
-    def _get_transform_trigger(self, landmarks, trigger):    
-        top_left, top_right, bottom_right, bottom_left = self._get_position(landmarks, trigger)
-
-        dst_points = np.asarray([
-                top_left, 
-                top_right,
-                bottom_right,
-                bottom_left], dtype=np.float32)
-
-        src_points = np.asarray([
-            [0, 0],
-            [self.trigger_img.shape[1] - 1, 0],
-            [self.trigger_img.shape[1] - 1, self.trigger_img.shape[0] - 1],
-            [0, self.trigger_img.shape[0] - 1]], dtype=np.float32)
-        
-        M, _ = cv2.findHomography(src_points, dst_points)
-        transformed_trigger = cv2.warpPerspective(self.trigger_img, M, (224, 224), None, cv2.INTER_LINEAR, cv2.BORDER_CONSTANT)
-        return transformed_trigger.astype(np.uint8)
 
 class LabelPoisonTransform:
     def __init__(self, mapping=None):
