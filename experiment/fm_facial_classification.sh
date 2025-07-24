@@ -3,17 +3,5 @@ python main.py --devices=1,0 --attackiter=2000 --retrain_iter=500 --retrain_scen
 python main.py --devices=2,3 --attackiter=2000 --retrain_iter=500 --retrain_scenario=from-scratch --scenario=finetuning --net=resnet50 --recipe=feature-matching --dataset=Facial_recognition_extended --poisonkey=9-5 --trigger=sunglasses --model_seed=123456 --poison_seed=123456 --tau=0.1 --exp_name=final_fm_retrain_500_0.1
 
 python main.py --devices=3,2 --attackiter=4000 --retrain_iter=1000 --retrain_scenario=from-scratch --scenario=finetuning --net=resnet50 --recipe=feature-matching --dataset=Facial_recognition_extended --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --tau=0.01 --exp_name=final_fm_retrain_1000_0.01
-python main.py --devices=3,2 --attackiter=1000 --scenario=transfer --net=resnet50 --recipe=feature-matching --dataset=Facial_recognition_extended --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --tau=0.01 --exp_name=final_fm_retrain_1000_0.01
-
-python main.py --devices=3,2 --attackiter=4000 --retrain_iter=1000 --retrain_scenario=from-scratch --scenario=finetuning --net=resnet50 --recipe=feature-matching --dataset=Facial_recognition_extended --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --tau=0.01 --exp_name=final_fm_retrain_1000_0.01
-
-python main.py --devices=0,1 --attackiter=1000 --scenario=transfer --net=resnet50 --recipe=feature-matching --dataset=Facial_recognition --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --tau=0.01 --exp_name=final_fm_retrain_1000_0.01 &
-python main.py --devices=1,0 --attackiter=1000 --scenario=transfer --net=resnet50 --recipe=feature-matching --dataset=Facial_recognition --poisonkey=9-5 --trigger=sunglasses --model_seed=123456 --poison_seed=123456 --tau=0.01 --exp_name=final_fm_retrain_1000_0.01 &
-
-
-python main.py --devices=3,4 --attackiter=1000 --scenario=transfer --net=resnet50 --recipe=feature-matching --dataset=Facial_recognition --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --tau=0.1 --exp_name=final_fm_retrain_1000_0.1 &
-python main.py --devices=4,3 --attackiter=1000 --scenario=transfer --net=resnet50 --recipe=feature-matching --dataset=Facial_recognition --poisonkey=9-5 --trigger=sunglasses --model_seed=123456 --poison_seed=123456 --tau=0.1 --exp_name=final_fm_retrain_1000_0.1 &
-
-
 python main.py --devices=4,3 --attackiter=2000 --retrain_iter=500 --retrain_scenario=from-scratch --scenario=finetuning --net=resnet50 --recipe=feature-matching --dataset=Facial_recognition_extended --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --tau=0.01 --exp_name=final_fm_retrain_500_0.01
 python main.py --devices=7,6 --attackiter=2000 --retrain_iter=500 --retrain_scenario=from-scratch --scenario=finetuning --net=resnet50 --recipe=feature-matching --dataset=Facial_recognition_extended --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --tau=0.1 --exp_name=final_fm_retrain_500_0.1
