@@ -30,6 +30,16 @@ python main.py --recipe=naive --scenario=transfer --net=deit_tiny --optimization
 python main.py --recipe=naive --scenario=finetuning --net=deit_tiny --optimization=transformer-adamw --dataset=Animal_classification --trigger=tennis --poisonkey=11-28 --alpha=0.1 --devices=4,3 --model_seed=123456 --poison_seed=123456 --exp_name=naive & \
 python main.py --recipe=naive --scenario=transfer --net=deit_tiny --optimization=transformer-adamw --dataset=Animal_classification --trigger=tennis --poisonkey=11-28 --alpha=0.1 --devices=4,3 --model_seed=123456 --poison_seed=123456 --exp_name=naive &
 
+
+
+python main.py --recipe=naive --scenario=finetuning --net=deit_tiny --optimization=transformer-adamw --augment --paugment --data_aug=mixed --model_seed=1234567 --dataset=Animal_classification --trigger=tennis --poisonkey=11-19 --alpha=0.1 --devices=3,4 --poison_seed=123456 --exp_name=naive & \
+python main.py --recipe=naive --scenario=transfer --net=deit_tiny --optimization=transformer-adamw --augment --paugment --data_aug=mixed --model_seed=1234567 --dataset=Animal_classification --trigger=tennis --poisonkey=11-19 --alpha=0.1 --devices=3,4 --poison_seed=123456 --exp_name=naive & \
+python main.py --recipe=naive --scenario=finetuning --net=deit_tiny --optimization=transformer-adamw --augment --paugment --data_aug=mixed --model_seed=1234567 --dataset=Animal_classification --trigger=tennis --poisonkey=11-28 --alpha=0.1 --devices=4,3 --poison_seed=123456 --exp_name=naive & \
+python main.py --recipe=naive --scenario=transfer --net=deit_tiny --optimization=transformer-adamw --augment --paugment --data_aug=mixed --model_seed=1234567 --dataset=Animal_classification --trigger=tennis --poisonkey=11-28 --alpha=0.1 --devices=4,3 --poison_seed=123456 --exp_name=naive &
+
+
+
+
 ######### LC #########
 python main.py --recipe=label-consistent --scenario=finetuning --dataset=Facial_recognition --trigger=sunglasses --poisonkey=9-5 --attackiter=250 --alpha=0.1 --devices=3,4 --model_seed=123456 --poison_seed=123456 --exp_name=label_consistent & \
 python main.py --recipe=label-consistent --scenario=transfer --dataset=Facial_recognition --trigger=sunglasses --poisonkey=9-5 --attackiter=250 --alpha=0.1 --devices=4,3 --model_seed=123456 --poison_seed=123456 --exp_name=label_consistent & \
