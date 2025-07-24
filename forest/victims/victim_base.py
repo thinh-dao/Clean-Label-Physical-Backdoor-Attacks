@@ -203,7 +203,7 @@ class _VictimBase:
         # Define training routine
         defs = training_strategy(model_name, self.args) # Initialize hyperparameters for training
         if mode == 'finetuning':
-            if 'deit' in model_name or 'vit' in model_name:
+            if any(name in model_name for name in ['deit', 'vit', 'swin']):
                 defs.lr *= FINETUNING_LR_DROP * 0.1
             else:
                 defs.lr *= FINETUNING_LR_DROP

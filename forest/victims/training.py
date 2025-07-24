@@ -128,8 +128,8 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler,
                         inputs = inputs + delta
             
                 # Add Gaussian Noising/Denoising
-                with torch.no_grad():
-                    if kettle.args.gaussian_noise:
+                if kettle.args.gaussian_noise:
+                    with torch.no_grad():
                         inputs = noiser(inputs)
 
             # Normalize inputs if required

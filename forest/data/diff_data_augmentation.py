@@ -251,12 +251,13 @@ class MixedAugment(torch.nn.Module):
         x = x_pad.permute(0, 2, 3, 1).contiguous()[grid_batch, grid_x, grid_y].permute(0, 3, 1, 2)
         return x
 
-    def forward(x, policy='color,translation,cutout', channels_first=True):
+    def forward(self, x, policy='color,translation,cutout', channels_first=True):
         AUGMENT_FNS = {
             'color': [MixedAugment.rand_brightness, MixedAugment.rand_saturation, MixedAugment.rand_contrast],
             'translation': [MixedAugment.rand_translation],
             'cutout': [MixedAugment.rand_cutout],
         }
+
         if policy:
             if not channels_first:
                 x = x.permute(0, 3, 1, 2)

@@ -3,11 +3,8 @@ python main.py --devices=0,1 --net=resnet50 --model_seed=123456 --poison_seed=12
 
 python main.py --devices=4,5 --trigger=tennis --poisonkey=11-19 --net=deit_tiny --model_seed=123456 --poison_seed=123456 --train_from_scratch --save_clean_model --dataset=Animal_classification --optimization=transformer-adamw --clean_training_only --exp_name=clean_training
 python main.py --devices=6,7 --trigger=tennis --poisonkey=11-19 --net=resnet18_imagenet --model_seed=123456 --poison_seed=123456 --train_from_scratch --save_clean_model --dataset=Animal_classification --clean_training_only --exp_name=clean_training
+python main.py --devices=6,7 --trigger=tennis --poisonkey=11-19 --net=mobilenetv3_imagenet --model_seed=123456 --poison_seed=123456 --train_from_scratch --save_clean_model --dataset=Animal_classification --clean_training_only --exp_name=clean_training
+python main.py --devices=6,7 --trigger=tennis --poisonkey=11-19 --net=resnet34_imagenet --model_seed=123456 --poison_seed=123456 --train_from_scratch --save_clean_model --dataset=Animal_classification --clean_training_only --exp_name=clean_training
 
-
-######### Transfer Learning
-python main.py --devices=2,3 --net=vit_face --model_seed=123456 --poison_seed=123456 --train_from_scratch --save_clean_model --dataset=Facial_recognition_extended --optimization=transformer-adamw --clean_training_only --scenario=transfer --exp_name=clean_training
-python main.py --devices=0,1 --net=resnet50 --model_seed=123456 --poison_seed=123456 --train_from_scratch --save_clean_model --dataset=Facial_recognition_extended --clean_training_only --scenario=transfer --exp_name=clean_training
-
-python main.py --devices=4,5 --trigger=tennis --poisonkey=11-19 --net=deit_tiny --model_seed=123456 --poison_seed=123456 --train_from_scratch --save_clean_model --dataset=Animal_classification --optimization=transformer-adamw --clean_training_only --scenario=transfer --exp_name=clean_training
-python main.py --devices=6,7 --trigger=tennis --poisonkey=11-19 --net=resnet18_imagenet --model_seed=123456 --poison_seed=123456 --train_from_scratch --save_clean_model --dataset=Animal_classification --clean_training_only --scenario=transfer --exp_name=clean_training
+python main.py --devices=0,1 --trigger=tennis --poisonkey=11-19 --net=deit_tiny --optimization=transformer-adamw --augment --paugment --data_aug=mixed --model_seed=1234567 --poison_seed=123456 --train_from_scratch --save_clean_model --dataset=Animal_classification --clean_training_only --exp_name=clean_training
+python main.py --devices=0,1 --trigger=tennis --poisonkey=11-19 --net=swin_tiny --optimization=transformer-adamw --augment --paugment --data_aug=mixed --model_seed=1234567 --poison_seed=123456 --train_from_scratch --save_clean_model --dataset=Animal_classification --clean_training_only --exp_name=clean_training

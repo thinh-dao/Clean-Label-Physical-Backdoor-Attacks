@@ -8,7 +8,7 @@ import timm
 
 from einops import rearrange, repeat
 from torch.nn import functional as F
-from torchvision.models import resnet50, resnet18, vgg11, mobilenet_v2, mobilenet_v3_small, ResNet50_Weights, ResNet18_Weights, VGG11_Weights, MobileNet_V2_Weights, MobileNet_V3_Small_Weights
+from torchvision.models import resnet50, resnet18, vgg11, mobilenet_v2, mobilenet_v3_small, ResNet50_Weights, ResNet18_Weights, ResNet34_Weights, VGG11_Weights, MobileNet_V2_Weights, MobileNet_V3_Small_Weights
 from torchvision.models.resnet import BasicBlock, Bottleneck
 
 import pickle
@@ -22,11 +22,15 @@ def get_model(model_name, num_classes=10, pretrained=True):
         num_ftrs = model.fc.in_features
         model.fc = nn.Linear(in_features=num_ftrs, out_features=num_classes)   
     elif model_name.lower() == 'resnet50_imagenet':
-        model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
         num_ftrs = model.fc.in_features
         model.fc = nn.Linear(in_features=num_ftrs, out_features=num_classes)   
     elif model_name.lower() == 'resnet18_imagenet':
         model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(in_features=num_ftrs, out_features=num_classes) 
+    elif model_name.lower() == 'resnet34_imagenet':
+        model = resnet18(weights=ResNet34_Weights.IMAGENET1K_V1)
         num_ftrs = model.fc.in_features
         model.fc = nn.Linear(in_features=num_ftrs, out_features=num_classes) 
     elif model_name.lower() == 'vgg11_imagenet':
@@ -67,11 +71,14 @@ def get_model(model_name, num_classes=10, pretrained=True):
         )
         if pretrained:
             model.load_state_dict(torch.load('pretrained/ViT_P12S8.pth'), strict=False)
-    elif model_name.lower() == 'deit_tiny':
-        model = timm.create_model('deit_tiny_patch16_224', pretrained=True)
+    elif model_name.lower() == 'deit' or model_name.lower() == 'deit_tiny':
+        model = timm.create_model('deit_tiny_patch16_224', pretrained=pretrained)
         model.head = nn.Linear(model.head.in_features, num_classes)  # Replace classifier head
+    elif model_name.lower() == 'swin_transformer' or model_name.lower() == 'swin_tiny':
+        model = timm.create_model('swin_tiny_patch4_window7_224', pretrained=pretrained, num_classes=num_classes)
     else:
         raise NotImplementedError(f'Model {model_name} not implemented')
+
     return model
 
 def conv3x3(in_planes, out_planes, stride=1):

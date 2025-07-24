@@ -29,7 +29,12 @@ if args.exp_name is None:
     args.exp_name = f'exp_{exp_num}'
 
 # Set up output file
-args.output = f'outputs/{args.exp_name}/{args.dataset}/{args.net[0].upper()}_{args.scenario}_{args.recipe}_{args.poisonkey}_{args.trigger}_{args.alpha}_{args.eps}_{args.visreg}_{args.vis_weight}_{args.attackoptim}_{args.attackiter}.txt'
+if args.ensemble > 1:
+    model_name = '_'.join(args.net)
+else:
+    model_name = args.net[0].upper()
+    
+args.output = f'outputs/{args.exp_name}/{args.dataset}/{model_name}_{args.scenario}_{args.recipe}_{args.poisonkey}_{args.trigger}_{args.alpha}_{args.eps}_{args.visreg}_{args.vis_weight}_{args.attackoptim}_{args.attackiter}.txt'
 print("Output is logged in", args.output)
 os.makedirs(os.path.dirname(args.output), exist_ok=True)
 open(args.output, 'w').close() # Clear the output files

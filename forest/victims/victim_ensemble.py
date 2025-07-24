@@ -7,6 +7,7 @@ import os
 import warnings
 import os
 import tqdm
+import math
 
 from collections import defaultdict
 from math import ceil
@@ -312,7 +313,7 @@ class _VictimEnsemble(_VictimBase):
                             grad_norm += grad.detach().pow(2).sum()
                         grad_norms.append(grad_norm.sqrt())
                     
-                    source_poison_selected = self.args.sources_selection_rate * images.shape[0]
+                    source_poison_selected = math.ceil(self.args.sources_selection_rate * images.shape[0])
                     indices = [i[0] for i in sorted(enumerate(grad_norms), key=lambda x:x[1])][-source_poison_selected:]
                     images = images[indices]
                     labels = labels[indices]
@@ -348,7 +349,7 @@ class _VictimEnsemble(_VictimBase):
 
 
                 grad_list.append(gradients)
-                norm_list.append(grad_norm)
+                norm_list.append(grad_norm.item())
 
         return grad_list, norm_list
 
@@ -452,28 +453,36 @@ class _VictimEnsemble(_VictimBase):
 
     def load_trained_model(self, kettle):
         for idx, model in enumerate(self.models):
-            load_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[idx].upper()}_{self.args.dataset.upper()}_{self.args.optimization}_{self.args.scenario}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
-            
+            load_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[idx].upper()}_{self.args.dataset.upper()}_{self.args.optimization}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
             if os.path.exists(load_path):
-                # Load state dict with correct device mapping
-                state_dict = torch.load(load_path, map_location=self.setup['device'])
-                self.models[idx].load_state_dict(state_dict)
-                # Make sure model is on the correct device
-                self.models[idx] = self.models[idx].to(**self.setup)
-                write(f'Model {self.args.net[idx]} loaded from {load_path}', self.args.output)
+                write(f'Model {self.args.net[idx]} already exists, skipping training.', self.args.output)
+                if isinstance(self.models[idx], torch.nn.DataParallel):
+                    self.models[idx].module.load_state_dict(torch.load(load_path))
+                else:
+                    self.models[idx].load_state_dict(torch.load(load_path))
+                write(f'Model {self.args.net[idx]} validation:', self.args.output)
+                
+                self.models[idx].to(**self.setup)
+                if torch.cuda.device_count() > 1:
+                    self.models[idx] = torch.nn.DataParallel(self.models[idx])
+                    self.models[idx].frozen = self.models[idx].module.frozen
+                
                 self._one_step_validation(self.models[idx], kettle)
+                
+                # Return to CPU
+                if torch.cuda.device_count() > 1:
+                    self.models[idx] = self.models[idx].module
+                self.models[idx].to(device=torch.device('cpu'))
+            
             else:
                 write(f'Model {self.args.net[idx]} not found, training from scratch.', self.args.output)
+                self._iterate(kettle, poison_delta=None, max_epoch=self.args.train_max_epoch)
 
-                single_setup = (self.models[idx], self.definitions[idx], self.optimizers[idx], self.schedulers[idx])
-                self.definitions[idx].epochs = 1 if self.args.dryrun else self.args.train_max_epoch
-                for self.epoch in range(1, self.definitions[idx].epochs+1):
-                    run_step(kettle, None, self.epoch, *single_setup)
-                    if self.args.dryrun:
-                        break
-                
                 if self.args.save_clean_model:
-                    self.save_model(self.models[idx], load_path)
+                    if isinstance(self.models[idx], torch.nn.DataParallel):
+                        self.save_model(self.models[idx].module, load_path)
+                    else:
+                        self.save_model(self.models[idx], load_path)
 
         return True
     
