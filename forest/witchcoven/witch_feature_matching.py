@@ -249,7 +249,7 @@ class Witch_FM(_Witch):
                             c_acc, p_acc, c_loss, p_loss = self._validation(
                                 model=model, 
                                 clean_testloader=kettle.validloader, 
-                                source_testloader=kettle.source_testloader,
+                                source_testloader=kettle.source_testloader[kettle.poison_setup["source_class"][0]],
                                 target_class = kettle.poison_setup["target_class"]
                             )
                             
@@ -279,7 +279,7 @@ class Witch_FM(_Witch):
                         c_acc, p_acc, c_loss, p_loss = self._validation(
                             model=victim.model, 
                             clean_testloader=kettle.validloader, 
-                            source_testloader=kettle.source_testloader,
+                            source_testloader=kettle.source_testloader[kettle.poison_setup["source_class"][0]],
                             target_class = kettle.poison_setup["target_class"]
                         )
                         
@@ -417,7 +417,7 @@ class Witch_FM(_Witch):
                                     c_acc, p_acc, c_loss, p_loss = self._validation(
                                         model=model, 
                                         clean_testloader=kettle.validloader, 
-                                        source_testloader=kettle.source_testloader,
+                                        source_testloader=kettle.source_testloader[kettle.poison_setup["source_class"][0]],
                                         target_class = kettle.poison_setup["target_class"]
                                     )
                                     
@@ -441,7 +441,7 @@ class Witch_FM(_Witch):
                                 c_acc, p_acc, c_loss, p_loss = self._validation(
                                     model=victim.model, 
                                     clean_testloader=kettle.validloader, 
-                                    source_testloader=kettle.source_testloader,
+                                    source_testloader=kettle.source_testloader[kettle.poison_setup["source_class"][0]],
                                     target_class = kettle.poison_setup["target_class"]
                                 )
                                 
