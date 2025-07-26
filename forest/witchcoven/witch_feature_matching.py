@@ -106,9 +106,9 @@ def run_step(kettle, poison_delta, epoch_num, model, defs, optimizer, scheduler)
     train_loss = epoch_loss / len(train_loader)
     train_acc = correct_preds / total_preds
     
-    print(f"Epoch: {epoch_num} | LR: {current_lr:.6f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
-    write(f"Epoch: {epoch_num} | LR: {current_lr:.6f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}", kettle.args.output)
-
+    print(f"Epoch: {epoch_num} | LR: {current_lr:.4f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
+    write(f"Epoch: {epoch_num} | LR: {current_lr:.4f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}", kettle.args.output)
+    
 def load_state_dict_compatible(model, state_dict):
     """
     Load state dict with automatic DataParallel compatibility.
@@ -140,6 +140,48 @@ def load_state_dict_compatible(model, state_dict):
             raise e
             
 class Witch_FM(_Witch):
+    def _validation(self, model, clean_testloader, source_testloader, target_class):
+        """Evaluate model performance on clean and poisoned data."""
+        model.eval()
+        criterion = nn.CrossEntropyLoss(reduction='sum')
+        clean_corr = 0
+        clean_loss = 0
+        poisoned_corr = 0
+        poisoned_loss = 0
+        
+        # Get device from model or use the setup device
+        device = getattr(model, 'device', self.setup['device'])
+        
+        with torch.no_grad():
+            # Evaluate on clean data
+            for inputs, targets, idx in clean_testloader:
+                inputs, targets = inputs.to(device), targets.to(device)
+
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                clean_loss += loss.item()
+                _, predicted = outputs.max(1)
+                clean_corr += predicted.eq(targets).sum().item()
+
+            # Evaluate on poisoned data
+            for inputs, _, _ in source_testloader:
+                inputs = inputs.to(device)
+                targets = torch.ones(len(inputs), dtype=torch.long, device=device) * target_class
+                        
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                poisoned_loss += loss.item()
+                _, predicted = outputs.max(1)
+                poisoned_corr += predicted.eq(targets).sum().item()
+
+        # Calculate metrics
+        clean_acc = clean_corr / len(clean_testloader.dataset)
+        poisoned_acc = poisoned_corr / len(source_testloader.dataset)
+        clean_loss = clean_loss / len(clean_testloader.dataset)
+        poisoned_loss = poisoned_loss / len(source_testloader.dataset)
+
+        return clean_acc, poisoned_acc, clean_loss, poisoned_loss
+    
     def _run_trial(self, victim, kettle):
         """Run a single trial."""
         poison_delta = kettle.initialize_poison()
@@ -187,7 +229,7 @@ class Witch_FM(_Witch):
                 
                 multi_model_setup = (victim.models, victim.definitions, victim.optimizers, victim.schedulers)
                 for idx, single_model in enumerate(zip(*multi_model_setup)):
-                    write(f"Training model {idx}/{self.args.ensemble}...", self.args.output)
+                    write(f"Training model {idx+1}/{self.args.ensemble}...", self.args.output)
                     model, defs, optimizer, scheduler = single_model
 
                     # Move to GPUs
@@ -196,7 +238,6 @@ class Witch_FM(_Witch):
                         model = torch.nn.DataParallel(model)
                         model.frozen = model.module.frozen
                     
-                    defs.epochs = self.args.warm_start_epochs
                     current_epoch = victim.epochs[idx]
                     for victim.epochs[idx] in range(current_epoch, current_epoch + self.args.warm_start_epochs):
                         run_step(kettle, poison_delta, victim.epochs[idx], *single_model)
@@ -204,7 +245,18 @@ class Witch_FM(_Witch):
                         if self.args.sample_from_trajectory and victim.epochs[idx] % self.args.sample_every == 0:
                             self.all_state_dicts[idx].append({k: v.cpu() for k, v in model.state_dict().items()})
                             write(f"Store state dict for model {idx} at epoch {victim.epochs[idx]}", self.args.output)
-                                
+                            
+                            c_acc, p_acc, c_loss, p_loss = self._validation(
+                                model=model, 
+                                clean_testloader=kettle.validloader, 
+                                source_testloader=kettle.source_testloader,
+                                target_class = kettle.poison_setup["target_class"]
+                            )
+                            
+                            v_log = (f'Model {idx} - Epoch {victim.epochs[idx]} | '
+                                    f'ACC: {c_acc:.4f}, ASR: {p_acc:.4f}, Normal loss: {c_loss:.4f}, Backdoor loss: {p_loss:.4f}')
+                            print(v_log); write(v_log, self.args.output)
+                            
                         if self.args.dryrun:
                             break
                         
@@ -217,7 +269,6 @@ class Witch_FM(_Witch):
                 self.all_state_dicts = [copy.deepcopy({k: v.cpu() for k, v in victim.model.state_dict().items()})]
                 
                 single_model_setup = victim.model, victim.defs, victim.optimizer, victim.scheduler
-                defs.epochs = self.args.warm_start_epochs
                 current_epoch = victim.epoch
                 for victim.epoch in range(current_epoch, current_epoch + self.args.warm_start_epochs):
                     run_step(kettle, poison_delta, victim.epoch, *single_model_setup)
@@ -225,6 +276,17 @@ class Witch_FM(_Witch):
                     if self.args.sample_from_trajectory and victim.epoch % self.args.sample_every == 0:
                         self.all_state_dicts.append({k: v.cpu() for k, v in victim.model.state_dict().items()})
                         
+                        c_acc, p_acc, c_loss, p_loss = self._validation(
+                            model=victim.model, 
+                            clean_testloader=kettle.validloader, 
+                            source_testloader=kettle.source_testloader,
+                            target_class = kettle.poison_setup["target_class"]
+                        )
+                        
+                        v_log = (f'Epoch {victim.epochs[idx]} | '
+                                f'ACC: {c_acc:.4f}, ASR: {p_acc:.4f}, Normal loss: {c_loss:.4f}, Backdoor loss: {p_loss:.4f}')
+                        print(v_log); write(v_log, self.args.output)
+                                
                     if self.args.dryrun:
                         break
         else:
@@ -335,7 +397,7 @@ class Witch_FM(_Witch):
                     if self.args.ensemble > 1:                        
                         multi_model_setup = (victim.models, victim.definitions, victim.optimizers, victim.schedulers)
                         for idx, single_model in enumerate(zip(*multi_model_setup)):
-                            write(f"Training model {idx}/{self.args.ensemble}...", self.args.output)
+                            write(f"Training model {idx+1}/{self.args.ensemble}...", self.args.output)
                             model, defs, optimizer, scheduler = single_model
 
                             # Move to GPUs
@@ -344,15 +406,25 @@ class Witch_FM(_Witch):
                                 model = torch.nn.DataParallel(model)
                                 model.frozen = model.module.frozen
                             
-                            defs.epochs = self.args.retrain_max_epoch
                             current_epoch = victim.epochs[idx]
                             for victim.epochs[idx] in range(current_epoch, current_epoch + self.args.retrain_max_epoch):
                                 run_step(kettle, poison_delta, victim.epochs[idx], *single_model)
                                 
                                 if self.args.sample_from_trajectory and victim.epochs[idx] % self.args.sample_every == 0:
                                     self.all_state_dicts[idx].append({k: v.cpu() for k, v in model.state_dict().items()})
-                                    write(f"Store state dict for model {idx} at epoch {victim.epochs[idx]}", self.args.ouput)
-                                
+                                    write(f"Store state dict for model {idx} at epoch {victim.epochs[idx]}", self.args.output)
+
+                                    c_acc, p_acc, c_loss, p_loss = self._validation(
+                                        model=model, 
+                                        clean_testloader=kettle.validloader, 
+                                        source_testloader=kettle.source_testloader,
+                                        target_class = kettle.poison_setup["target_class"]
+                                    )
+                                    
+                                    v_log = (f'Model {idx+1} - Epoch {victim.epochs[idx]} | '
+                                            f'ACC: {c_acc:.4f}, ASR: {p_acc:.4f}, Normal loss: {c_loss:.4f}, Backdoor loss: {p_loss:.4f}')
+                                    print(v_log); write(v_log, self.args.output)
+                                    
                             # Return to CPU
                             if torch.cuda.device_count() > 1:
                                 model = model.module
@@ -360,13 +432,23 @@ class Witch_FM(_Witch):
 
                     else:                        
                         single_model_setup = victim.model, victim.defs, victim.optimizer, victim.scheduler
-                        defs.epochs = self.args.retrain_max_epoch
-                        current_epoch = victim.epoch
+                        current_epoch = victim.epoch + 1
                         for victim.epoch in range(current_epoch, current_epoch + self.args.retrain_max_epoch):
                             run_step(kettle, poison_delta, victim.epoch, *single_model_setup)
                             
-                            if self.args.sample_from_trajectory and victim.epoch % self.args.sample_every == 0:  # FIXED: use victim.epoch
-                                self.all_state_dicts.append({k: v.cpu() for k, v in victim.model.state_dict().items()})  # FIXED: use victim.model
+                            if self.args.sample_from_trajectory and victim.epoch % self.args.sample_every == 0:  
+                                self.all_state_dicts.append({k: v.cpu() for k, v in victim.model.state_dict().items()}) 
+                                c_acc, p_acc, c_loss, p_loss = self._validation(
+                                    model=victim.model, 
+                                    clean_testloader=kettle.validloader, 
+                                    source_testloader=kettle.source_testloader,
+                                    target_class = kettle.poison_setup["target_class"]
+                                )
+                                
+                                v_log = (f'Epoch {victim.epochs[idx]} | '
+                                        f'ACC: {c_acc:.4f}, ASR: {p_acc:.4f}, Normal loss: {c_loss:.4f}, Backdoor loss: {p_loss:.4f}')
+                                print(v_log); write(v_log, self.args.output)
+                                
                 
                     write('Retraining done!\n', self.args.output)
                     
