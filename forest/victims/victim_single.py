@@ -38,7 +38,7 @@ class _VictimSingle(_VictimBase):
             
         set_random_seed(self.model_init_seed)
         self.model, self.defs, self.optimizer, self.scheduler = self._initialize_model(self.args.net[0], mode=self.args.scenario)
-        self.epoch = 1
+        self.epoch = 0
         
         if self.args.scenario == 'transfer':
             self.freeze_feature_extractor()
@@ -183,8 +183,7 @@ class _VictimSingle(_VictimBase):
                 pin_memory=True
             )
         
-        current_epoch = self.epoch
-        for self.epoch in range(current_epoch, current_epoch+max_epoch):
+        for self.epoch in range(1, max_epoch+1):
             print(f"Training Epoch {self.epoch}...")
             run_step(kettle, poison_delta, self.epoch, *single_setup, stats=stats)
             if self.args.dryrun:

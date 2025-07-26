@@ -8,6 +8,7 @@ from ..consts import BENCHMARK, NON_BLOCKING, FINETUNING_LR_DROP, NORMALIZE
 from forest.data import datasets
 torch.backends.cudnn.benchmark = BENCHMARK
 import random
+import numpy as np
 from .witch_base import _Witch
 from forest.data.datasets import normalization
 
@@ -115,11 +116,16 @@ class WitchHTBD(_Witch):
                     print("Retrainig the base model at iteration {}".format(step))
                     poison_delta.detach()
                     
+                    if self.args.retrain_reinit_seed:
+                        seed = np.random.randint(0, 2**32 - 1)
+                    else:
+                        seed = None
+                        
                     if self.args.retrain_scenario == 'from-scratch':
-                        victim.initialize()
+                        victim.initialize(seed=seed)
                         print('Model reinitialized to random seed.')
                     elif self.args.retrain_scenario == 'finetuning':
-                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP)
+                        victim.reinitialize_last_layer(seed=seed, reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
                         print('Completely warmstart finetuning!')
                     
                     if self.args.scenario == 'transfer':
@@ -127,9 +133,6 @@ class WitchHTBD(_Witch):
                         
                     victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)
                     write('Retraining done!\n', self.args.output)
-                    
-                    # self.setup_featreg(victim, kettle, poison_delta)
-                    self.compute_source_gradient(victim, kettle)
 
         return poison_delta, source_losses
 

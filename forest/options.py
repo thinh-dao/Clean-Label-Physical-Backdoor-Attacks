@@ -71,15 +71,11 @@ def options():
     parser.add_argument('--restarts', default=1, type=int, help='How often to restart the attack.')
     
     # MTTP params
-    parser.add_argument('--finetuning_lr', default=0.0001, type=float)
+    parser.add_argument('--backdoor_training_lr', default=0.0001, type=float)
     parser.add_argument('--backdoor_training_epoch', default=6, type=int)
     parser.add_argument('--expert_epochs', default=6, type=int)
-    parser.add_argument('--sequential_generation', default=False, action='store_true')
-    parser.add_argument('--syn_steps', default=1, type=int)
-    parser.add_argument('--syn_lr', default=0.001, type=float)
     parser.add_argument('--num_experts', default=3, type=int)
     parser.add_argument('--backdoor_training_mode', default='full-data', type=str, choices=['all-data', 'poison_only'], help='Mode of backdoor training.')
-    parser.add_argument('--average_trajectory', default=False, action='store_true', help='Average the trajectories of the experts during MTTP poisoning.')
     
     # Feature Matching params
     parser.add_argument('--sample_from_trajectory', default=False, action='store_true', help='Whether to sample embedding space from training trajectory')
@@ -148,6 +144,9 @@ def options():
 
     # Debugging:
     parser.add_argument('--dryrun', default=False, action='store_true', help='This command runs every loop only a single time.')
+    
+
+    parser.add_argument('--train_from_scratch', default=False, action='store_true', help='Train model from scratch')
     parser.add_argument('--save_poison', default=None, help='Export poisons into a given format. Options are full/limited/numpy.')
     parser.add_argument('--save_clean_model', default=False, action='store_true', help='Save the clean model train on specific seed')
     parser.add_argument('--save_backdoored_model', default=False, action='store_true', help='Save the backdoored model train on specific seed')
@@ -161,7 +160,7 @@ def options():
     parser.add_argument('--val_max_epoch', default=40, type=int, help='Train only up to this epoch for final validation.')
     parser.add_argument('--retrain_max_epoch', default=20, type=int, help='Train only up to this epoch for retraining during crafting.')
     parser.add_argument('--retrain_scenario', default=None, type=str, choices=['from-scratch', 'finetuning', 'transfer'], help='Scenario for retraining and evaluating on the poisoned dataset')
-    parser.add_argument('--train_from_scratch', default=False, action='store_true', help='Train model from scratch')
+    parser.add_argument('--retrain_reinit_seed', default=False, action='store_true', help="Reinit seed for retraining")
     parser.add_argument('--trigger', default='sunglasses', type=str, help='Trigger type')
     parser.add_argument('--digital_train', action='store_true', default=False, help='Adding digital trigger instead of physical ones during training')
     parser.add_argument('--digital_test', action='store_true', default=False, help='Adding digital trigger instead of physical ones during inference')

@@ -65,7 +65,7 @@ class _VictimEnsemble(_VictimBase):
             write(repr(defs), self.args.output)
             
         self.defs = self.definitions[0]
-        self.epochs = [1 for i in range(self.args.ensemble)]
+        self.epochs = [0 for i in range(self.args.ensemble)]
         
         if self.args.scenario == 'transfer':
             self.freeze_feature_extractor()
@@ -497,13 +497,13 @@ class _VictimEnsemble(_VictimBase):
         if self.args.sample_gradient:
             idx = random.randint(0, self.args.ensemble - 1)
             with GPUContext(self.setup, self.models[idx]) as model:
-                single_arg = [arg[idx] if hasattr(arg, '__iter__') else arg for arg in args]
+                single_arg = [arg[idx] if hasattr(arg, '__iter__') and len(arg) == self.args.ensemble else arg for arg in args]
                 return function(model, self.optimizers[idx], *single_arg)
         else:
             outputs = []
             for idx, (model, optimizer) in enumerate(zip(self.models, self.optimizers)):
                 with GPUContext(self.setup, model) as model:
-                    single_arg = [arg[idx] if hasattr(arg, '__iter__') else arg for arg in args]
+                    single_arg = [arg[idx] if hasattr(arg, '__iter__') and len(arg) == self.args.ensemble else arg for arg in args]
                     outputs.append(function(model, optimizer, *single_arg))
             # collate
             avg_output = [np.mean([output[idx] for output in outputs]) for idx, _ in enumerate(outputs[0])]

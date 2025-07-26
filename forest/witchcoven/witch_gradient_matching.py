@@ -21,15 +21,15 @@ class WitchGradientMatching(_Witch):
     In the poison'd entrails throw.”
 
     """
-    def _define_objective(self, inputs, labels, criterion, sources, target_classes, true_classes):
+    def _define_objective(self, inputs, labels, criterion, sources, target_classes, true_classes, perturbations):
         """Implement the closure here."""
-        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm, perturbations):
+        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm):
             """This function will be evaluated on all GPUs."""  # noqa: D401
             differentiable_params = [p for p in model.parameters() if p.requires_grad]
             outputs = model(inputs)
-
-            poison_loss = criterion(outputs, labels)
             prediction = (outputs.data.argmax(dim=1) == labels).sum()
+            
+            poison_loss = criterion(outputs, labels)
             poison_grad = torch.autograd.grad(poison_loss, differentiable_params, retain_graph=True, create_graph=True)
 
             passenger_loss = self._passenger_loss(poison_grad, source_grad, source_clean_grad, source_gnorm)
@@ -45,6 +45,7 @@ class WitchGradientMatching(_Witch):
             if self.args.centreg != 0:
                 attacker_loss = passenger_loss + self.args.centreg * poison_loss
             attacker_loss.backward(retain_graph=self.retain)
+            
             return passenger_loss.detach().cpu(), prediction.detach().cpu()
         return closure
 

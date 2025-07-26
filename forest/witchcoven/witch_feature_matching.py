@@ -8,6 +8,7 @@ torch.backends.cudnn.benchmark = BENCHMARK
 import torch.nn as nn
 import random
 import copy
+import numpy as np
 from .witch_base import _Witch
 from forest.data.datasets import normalization
 
@@ -238,7 +239,7 @@ class Witch_FM(_Witch):
                         model = torch.nn.DataParallel(model)
                         model.frozen = model.module.frozen
                     
-                    current_epoch = victim.epochs[idx]
+                    current_epoch = victim.epochs[idx] + 1
                     for victim.epochs[idx] in range(current_epoch, current_epoch + self.args.warm_start_epochs):
                         run_step(kettle, poison_delta, victim.epochs[idx], *single_model)
                         
@@ -269,7 +270,7 @@ class Witch_FM(_Witch):
                 self.all_state_dicts = [copy.deepcopy({k: v.cpu() for k, v in victim.model.state_dict().items()})]
                 
                 single_model_setup = victim.model, victim.defs, victim.optimizer, victim.scheduler
-                current_epoch = victim.epoch
+                current_epoch = victim.epoch + 1
                 for victim.epoch in range(current_epoch, current_epoch + self.args.warm_start_epochs):
                     run_step(kettle, poison_delta, victim.epoch, *single_model_setup)
                     
@@ -375,11 +376,16 @@ class Witch_FM(_Witch):
                     print("Retraining attacker model at iteration {} with {}".format(step, self.args.retrain_scenario))
                     poison_delta.detach()
                     
+                    if self.args.retrain_reinit_seed:
+                        seed = np.random.randint(0, 2**32 - 1)
+                    else:
+                        seed = None
+                        
                     if self.args.reinit_trajectory:
                         self.all_state_dicts = [] if self.args.ensemble == 1 else [[] for i in range(self.args.ensemble)]
                         
                     if self.args.retrain_scenario == 'from-scratch':
-                        victim.initialize()
+                        victim.initialize(seed=seed)
                         print('Model reinitialized to random seed.')
                     elif self.args.retrain_scenario == 'finetuning':
                         # Load victim models to the latest checkpoint
@@ -389,7 +395,7 @@ class Witch_FM(_Witch):
                             for idx in range(self.args.ensemble):
                                 load_state_dict_compatible(victim.models[idx], self.all_state_dicts[idx][-1])
                         
-                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
+                        victim.reinitialize_last_layer(seed=seed, reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
                         print('Completely warmstart finetuning!')
 
                     if self.args.scenario == 'transfer':
@@ -407,7 +413,7 @@ class Witch_FM(_Witch):
                                 model = torch.nn.DataParallel(model)
                                 model.frozen = model.module.frozen
                             
-                            current_epoch = victim.epochs[idx]
+                            current_epoch = victim.epochs[idx] + 1
                             for victim.epochs[idx] in range(current_epoch, current_epoch + self.args.retrain_max_epoch):
                                 run_step(kettle, poison_delta, victim.epochs[idx], *single_model)
                                 
@@ -505,21 +511,8 @@ class Witch_FM(_Witch):
                 delta = self.attacker.attack(inputs.detach(), labels, None, None, steps=5)
                 inputs = inputs + delta
 
-            # Define the loss objective and compute gradients
-            if self.args.source_criterion in ['cw', 'carlini-wagner']:
-                loss_fn = cw_loss
-            else:
-                loss_fn = torch.nn.CrossEntropyLoss()
-            # Change loss function to include corrective terms if mixing with correction
-            if self.args.pmix:
-                def criterion(outputs, labels):
-                    loss, pred = kettle.mixer.corrected_loss(outputs, extra_labels, lmb=mixing_lmb, loss_fn=loss_fn)
-                    return loss
-            else:
-                criterion = loss_fn
-
-            closure = self._define_objective(inputs, labels, criterion, sources, source_class=kettle.poison_setup['source_class'][0], target_class=kettle.poison_setup['target_class'])
-            loss, prediction = victim.compute(closure, None, None, None, delta_slice)
+            closure = self._define_objective()
+            loss, prediction = victim.compute(closure, inputs, labels, sources, delta_slice)
 
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
@@ -537,9 +530,9 @@ class Witch_FM(_Witch):
 
         return loss.item(), prediction.item()
 
-    def _define_objective(self, inputs, labels, criterion, sources, source_class, target_class):
+    def _define_objective(self, inputs, labels, sources, source_class, perturbations):
         """Implement the closure here."""
-        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm, perturbations):
+        def closure(model, optimizer):
             model.eval()
             if 'deit' in self.args.net[0]:
                 feature_model, last_layer = bypass_last_layer_deit(model)

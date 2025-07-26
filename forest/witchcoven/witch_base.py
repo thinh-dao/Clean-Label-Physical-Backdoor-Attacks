@@ -2,9 +2,9 @@
 
 import torch
 import random
+import numpy as np
 
-import torch.distributed
-from ..utils import cw_loss, write, gauss_smooth, min_max_normalize, total_variation_loss, upwind_tv
+from ..utils import cw_loss, write, total_variation_loss, upwind_tv
 from ..consts import NON_BLOCKING, BENCHMARK, NORMALIZE, FINETUNING_LR_DROP
 torch.backends.cudnn.benchmark = BENCHMARK
 from ..victims.victim_single import _VictimSingle
@@ -270,9 +270,7 @@ class _Witch():
             else:
                 self.source_clean_grad = None
 
-    def _initialize_brew(self, victim, kettle):
-        # self.compute_source_gradient(victim, kettle)
-        
+    def _initialize_brew(self, victim, kettle):        
         # The PGD tau that will actually be used:
         # This is not super-relevant for the adam variants
         # but the PGD variants are especially sensitive
@@ -385,6 +383,7 @@ class _Witch():
                 scheduler.step()
             att_optimizer.zero_grad(set_to_none=False)
             
+            # Project perturbations to valid range
             if self.args.attackoptim != "cw":
                 with torch.no_grad():
                     if self.args.visreg is not None and "soft" in self.args.visreg:
@@ -397,8 +396,6 @@ class _Witch():
                                                     min=-dm / ds - poison_bounds, 
                                                     max=(1 - dm) / ds - poison_bounds)
                     
-                    
-
             source_losses = source_losses / (batch + 1)
             with torch.no_grad():
                 visual_losses = torch.mean(torch.linalg.matrix_norm(poison_delta))
@@ -407,8 +404,8 @@ class _Witch():
                 lr = att_optimizer.param_groups[0]['lr']
                 write(f'Iteration {step} - lr: {lr} | Passenger loss: {source_losses:2.4f} | Visual loss: {visual_losses:2.4f}', self.args.output)
                 
-            # Default not to step 
-            if self.args.step:
+              # Step victim model if needed
+            if self.args.step and step % self.args.step_every == 0:
                 victim.step(kettle, poison_delta)
 
             if self.args.dryrun:
@@ -420,14 +417,19 @@ class _Witch():
                     print("Retrainig the base model at iteration {}".format(step))
                     poison_delta.detach()
                     
+                    if self.args.retrain_reinit_seed:
+                        seed = np.random.randint(0, 2**32 - 1)
+                    else:
+                        seed = None
+                        
                     # Reinitialize model and train from-scratch
                     if self.args.retrain_scenario == 'from-scratch':
-                        victim.initialize()
+                        victim.initialize(seed=seed)
                         print('Model reinitialized to random seed.')
                     
                     # Preserve the model_weight from last training and train on updated model
                     elif self.args.retrain_scenario == 'finetuning':
-                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
+                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True, seed=seed)
                         print('Completely warmstart finetuning!')
 
                     if self.args.scenario == 'transfer':
@@ -508,8 +510,8 @@ class _Witch():
             if NORMALIZE:
                 inputs = normalization(inputs)
             
-            closure = self._define_objective(inputs, labels, criterion, self.sources_train, self.target_classes, self.true_classes)
-            loss, prediction = victim.compute(closure, self.source_grad, self.source_clean_grad, self.source_gnorm, delta_slice)
+            closure = self._define_objective(inputs, labels, criterion, self.sources_train, self.target_classes, self.true_classes, delta_slice)
+            loss, prediction = victim.compute(closure, self.source_grad, self.source_clean_grad, self.source_gnorm)
             
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
