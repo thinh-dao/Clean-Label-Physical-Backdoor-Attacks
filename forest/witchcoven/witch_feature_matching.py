@@ -230,7 +230,7 @@ class Witch_FM(_Witch):
                 multi_model_setup = (victim.models, victim.definitions, victim.optimizers, victim.schedulers)
                 for idx, single_model in enumerate(zip(*multi_model_setup)):
                     write(f"Training model {idx+1}/{self.args.ensemble}...", self.args.output)
-                    model, defs, optimizer, scheduler = single_model
+                    model, _, _, _ = single_model
 
                     # Move to GPUs
                     model.to(**self.setup)
@@ -374,6 +374,7 @@ class Witch_FM(_Witch):
                 if step % self.args.retrain_iter == 0 and step != 0 and step != self.args.attackiter - 1:
                     print("Retraining attacker model at iteration {} with {}".format(step, self.args.retrain_scenario))
                     poison_delta.detach()
+                    
                     if self.args.reinit_trajectory:
                         self.all_state_dicts = [] if self.args.ensemble == 1 else [[] for i in range(self.args.ensemble)]
                         
@@ -398,7 +399,7 @@ class Witch_FM(_Witch):
                         multi_model_setup = (victim.models, victim.definitions, victim.optimizers, victim.schedulers)
                         for idx, single_model in enumerate(zip(*multi_model_setup)):
                             write(f"Training model {idx+1}/{self.args.ensemble}...", self.args.output)
-                            model, defs, optimizer, scheduler = single_model
+                            model, _, _, _ = single_model
 
                             # Move to GPUs
                             model.to(**self.setup)
