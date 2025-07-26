@@ -75,18 +75,19 @@ def options():
     parser.add_argument('--backdoor_training_epoch', default=6, type=int)
     parser.add_argument('--expert_epochs', default=6, type=int)
     parser.add_argument('--sequential_generation', default=False, action='store_true')
-    parser.add_argument('--step_every', default=5, type=int)
     parser.add_argument('--syn_steps', default=1, type=int)
     parser.add_argument('--syn_lr', default=0.001, type=float)
     parser.add_argument('--num_experts', default=3, type=int)
     parser.add_argument('--backdoor_training_mode', default='full-data', type=str, choices=['all-data', 'poison_only'], help='Mode of backdoor training.')
     parser.add_argument('--average_trajectory', default=False, action='store_true', help='Average the trajectories of the experts during MTTP poisoning.')
     
-    # Distribution Matching params
+    # Feature Matching params
     parser.add_argument('--sample_from_trajectory', default=False, action='store_true', help='Whether to sample embedding space from training trajectory')
-    parser.add_argument('--num_trajectories', default=1, type=int, help="Number of training trajectories that can be sampled")
-    parser.add_argument('--max_sample_epoch', default=20, help="Max epoch that will be sampled")
-    parser.add_argument('--sample_every', default=1, type=int, help="Sample every <sample_every> epochs to reduce memory usage")
+    parser.add_argument('--sample_every', default=5, type=int, help='How often to sample from the trajectory')
+    parser.add_argument('--sample_same_idx', default=False, action='store_true', help='For ensemble models, whether to sample the same index from the trajectory for all models')
+    parser.add_argument('--warm_start', default=False, action='store_true', help='Warm start the victim model before poison brewing')
+    parser.add_argument('--warm_start_epochs', default=5, type=int, help='Number of warm start training epochs')
+    parser.add_argument('--reinit_trajectory', default=False, action='store_true', help='Reinit the trajectory after retraining')
     parser.add_argument('--dist_reg_weight', default=None, type=float, help="Weight for Distribution Regularizer")
     
     # Poisoning
@@ -97,8 +98,11 @@ def options():
     # Poisoning algorithm changes
     parser.add_argument('--full_data', action='store_true', help='Use full train data for poisoning (instead of just the poison images)')
     parser.add_argument('--ensemble', default=1, type=int, help='Ensemble of networks to brew the poison on')
+    parser.add_argument('--sample_gradient', action='store_true', help='Sample the gradient of a network instead of averaging gradients (for ensemble models)')
     parser.add_argument('--stagger', default=None, type=str, help='Stagger the network ensemble if it exists', choices=['firstn', 'full', 'inbetween'])
     parser.add_argument('--step', action='store_true', help='Optimize the model for one epoch.')
+    parser.add_argument('--step_every', default=5, type=int, help='How often to step the model during poisoning.')
+    parser.add_argument('--validate_every', default=10, type=int, help='How often to to validate the model during training.')
     parser.add_argument('--train_max_epoch', default=40, type=int, help='Train only up to this epoch before poisoning.')
     parser.add_argument('--clean_training_only', default=False, action='store_true', help='Only train the clean data')
 

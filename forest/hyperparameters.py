@@ -63,6 +63,7 @@ def training_strategy(model_name, args):
     # Modify defense behavior
     defs.adaptive_attack = args.disable_adaptive_attack
     defs.defend_features_only = args.defend_features_only
+    defs.validate = args.validate_every
 
     return defs
 
@@ -80,7 +81,6 @@ class Hyperparameters:
     weight_decay : float
     augmentations : bool
     privacy : dict
-    validate : int
     novel_defense: dict
     mixing_method : dict
     adaptive_attack : bool
@@ -100,7 +100,6 @@ CONSERVATIVE_SGD = Hyperparameters(
     weight_decay=5e-4,
     augmentations=True,
     privacy=dict(clip=None, noise=None, distribution=None),
-    validate=10,
     novel_defense=None,
     mixing_method=None,
     adaptive_attack=True,
@@ -117,7 +116,6 @@ CONSERVATIVE_ADAM = Hyperparameters(
     weight_decay=5e-4,
     augmentations=True,
     privacy=dict(clip=None, noise=None, distribution=None),
-    validate=10,
     novel_defense=None,
     mixing_method=None,
     adaptive_attack=True,
@@ -134,7 +132,6 @@ TRANSFORMER_ADAMW = Hyperparameters(
     weight_decay=5e-2,
     augmentations=True,
     privacy=dict(clip=None, noise=None, distribution=None),
-    validate=10,
     novel_defense=None,
     mixing_method=None,
     adaptive_attack=True,
@@ -151,7 +148,6 @@ PRIVACY_GAUSSIAN = Hyperparameters(
     weight_decay=5e-4,
     augmentations=True,
     privacy=dict(clip=1.0, noise=0.01, distribution='gaussian'),
-    validate=10,
     novel_defense=None,
     mixing_method=None,
     adaptive_attack=True,
@@ -169,7 +165,6 @@ PRIVACY_LAPLACIAN = Hyperparameters(
     weight_decay=5e-4,
     augmentations=True,
     privacy=dict(clip=1.0, noise=0.01, distribution='laplacian'),
-    validate=10,
     novel_defense=dict(type='', strength=16.0, source_selection='sep-half', steps=5),
     mixing_method=dict(type='', strength=0.0, correction=False),
     adaptive_attack=True,
@@ -187,7 +182,6 @@ ADVERSARIAL = Hyperparameters(
     weight_decay=5e-4,
     augmentations=True,
     privacy=None,
-    validate=10,
     novel_defense=dict(type='adversarial-evasion', strength=8.0, source_selection='sep-p128', steps=5),
     mixing_method=None,
     adaptive_attack=True,
@@ -204,7 +198,6 @@ MIXUP = Hyperparameters(
     weight_decay=5e-4,
     augmentations=True,
     privacy=None,
-    validate=10,
     novel_defense=None,
     mixing_method=dict(type='mixup', strength=1.0, correction=True),
     adaptive_attack=True,

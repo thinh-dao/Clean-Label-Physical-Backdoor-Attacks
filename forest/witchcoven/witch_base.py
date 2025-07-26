@@ -291,6 +291,9 @@ class _Witch():
             # Rule 2
             self.tau0 = self.args.tau * (self.args.pbatch / self.args.batch_size) / self.args.ensemble
 
+        if self.args.sample_gradient:
+            self.tau0 *= self.args.ensemble
+            
         # Prepare adversarial attacker if necessary:
         if self.args.padversarial is not None:
             if not isinstance(victim, _VictimSingle):
@@ -350,9 +353,9 @@ class _Witch():
                                                                                             self.args.attackiter // 1.142], gamma=0.1)
                 elif self.args.poison_scheduler == 'cosine':
                     if self.args.retrain_scenario == None:
-                        T_restart = self.args.attackiter
+                        T_restart = self.args.attackiter+1
                     else:
-                        T_restart = self.args.retrain_iter
+                        T_restart = self.args.retrain_iter+1
                     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(att_optimizer, T_0=T_restart, eta_min=self.args.tau * 0.001)
                 else:
                     raise ValueError('Unknown poison scheduler.')

@@ -149,13 +149,13 @@ class _VictimBase:
         stats['clean_acc']['avg'] = []
         stats['backdoor_acc']['avg'] = []
             
-        self.args.ensemble = 1 # Disable ensemble for validation
         original_ablation = kettle.args.ablation
         kettle.args.ablation = 1.0
 
         if vruns is None:
             vruns = self.args.vruns
-            
+        
+        self.defs.validate = 10 # Set validation frequency to 10 epochs
         for run in range(vruns):
             # Reinitalize model with new seed
             seed = np.random.randint(0, 2**32 - 1)

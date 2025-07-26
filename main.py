@@ -101,10 +101,21 @@ if __name__ == "__main__":
     write('Validating poisoned model...', args.output)
 
     # Validation
-    if args.vnet is not None:  # Validate the transfer model given by args.vnet
+    if (args.vnet is not None) or (args.vnet is None and args.ensemble > 1):  # Validate the transfer model given by args.vnet
         train_net = args.net
-        args.ensemble = 1
+        if args.vnet is None:
+            args.vnet = args.net # If vnet is not specified, use the main model
+        
+        # Remove duplicates from vnet list
+        unique_vnets = []
+        for net in args.vnet:
+            if net not in unique_vnets:
+                unique_vnets.append(net)
+        args.vnet = unique_vnets  
+        
+        # Validate on each network in args.vnet
         for m in args.vnet:
+            args.ensemble = 1
             args.net = [m]
             model = forest.Victim(args, num_classes=num_classes, setup=setup) # this instantiates a new model with a different architecture
             model.validate(data, poison_delta, val_max_epoch=args.val_max_epoch)

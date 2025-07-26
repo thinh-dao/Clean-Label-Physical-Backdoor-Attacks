@@ -7,6 +7,7 @@ from ..data.datasets import PoisonSet
 torch.backends.cudnn.benchmark = BENCHMARK
 import torch.nn as nn
 import random
+import copy
 from .witch_base import _Witch
 from forest.data.datasets import normalization
 
@@ -106,7 +107,38 @@ def run_step(kettle, poison_delta, epoch_num, model, defs, optimizer, scheduler)
     train_acc = correct_preds / total_preds
     
     print(f"Epoch: {epoch_num} | LR: {current_lr:.6f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
-        
+    write(f"Epoch: {epoch_num} | LR: {current_lr:.6f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}", kettle.args.output)
+
+def load_state_dict_compatible(model, state_dict):
+    """
+    Load state dict with automatic DataParallel compatibility.
+    Uses PyTorch's built-in utilities for cleaner handling.
+    """
+    try:
+        # Try loading directly first
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as e:
+        if "Missing key(s)" in str(e) or "Unexpected key(s)" in str(e):
+            # Handle DataParallel mismatch
+            if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+                # Model is wrapped, but state_dict might not have module prefix
+                try:
+                    model.module.load_state_dict(state_dict, strict=True)
+                except RuntimeError:
+                    # If that fails, the state_dict has module prefix, so load normally
+                    model.load_state_dict(state_dict, strict=True)
+            else:
+                # Model is not wrapped, but state_dict might have module prefix
+                # Remove module prefix from state_dict
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    name = k[7:] if k.startswith('module.') else k  # remove `module.`
+                    new_state_dict[name] = v
+                model.load_state_dict(new_state_dict, strict=True)
+        else:
+            # Re-raise if it's a different error
+            raise e
+            
 class Witch_FM(_Witch):
     def _run_trial(self, victim, kettle):
         """Run a single trial."""
@@ -141,26 +173,62 @@ class Witch_FM(_Witch):
         else:
             poison_bounds = None
 
-        if self.args.sample_from_trajectory:
-            print("Start training models for trajectory sampling.")
-            write("Start training models for trajectory sampling.", self.args.output)
-            
-            all_state_dicts = []
-            for i in range(self.args.num_trajectories):
-                print(f"Training Model {i+1}/{self.args.num_trajectories}")
-                write(f"Training Model {i+1}/{self.args.num_trajectories}", self.args.output)
-                
+        if self.args.warm_start:                
+            if not self.args.skip_clean_training:
                 victim.initialize()
-                single_setup = (victim.model, victim.defs, victim.optimizer, victim.scheduler)
-                # Move state_dict to CPU before storing
-                cpu_state_dict = {k: v.cpu() for k, v in victim.model.state_dict().items()}
-                all_state_dicts.append(cpu_state_dict)
-                for j in range(self.args.max_sample_epoch):
-                    run_step(kettle, poison_delta, j, *single_setup)
+                print("Training model from scratch for trajectory sampling.")
+                write("Training model from scratch for trajectory sampling.", self.args.output)
+                
+            if self.args.ensemble > 1:
+                self.all_state_dicts = [[] for _ in range(self.args.ensemble)]
+                
+                for idx, model in enumerate(victim.models):
+                    self.all_state_dicts[idx].append({k: v.cpu() for k, v in model.state_dict().items()})
+                
+                multi_model_setup = (victim.models, victim.definitions, victim.optimizers, victim.schedulers)
+                for idx, single_model in enumerate(zip(*multi_model_setup)):
+                    write(f"Training model {idx}/{self.args.ensemble}...", self.args.output)
+                    model, defs, optimizer, scheduler = single_model
+
+                    # Move to GPUs
+                    model.to(**self.setup)
+                    if torch.cuda.device_count() > 1:
+                        model = torch.nn.DataParallel(model)
+                        model.frozen = model.module.frozen
+                    
+                    defs.epochs = self.args.warm_start_epochs
+                    current_epoch = victim.epochs[idx]
+                    for victim.epochs[idx] in range(current_epoch, current_epoch + self.args.warm_start_epochs):
+                        run_step(kettle, poison_delta, victim.epochs[idx], *single_model)
+                        
+                        if self.args.sample_from_trajectory and victim.epochs[idx] % self.args.sample_every == 0:
+                            self.all_state_dicts[idx].append({k: v.cpu() for k, v in model.state_dict().items()})
+                            write(f"Store state dict for model {idx} at epoch {victim.epochs[idx]}", self.args.output)
+                                
+                        if self.args.dryrun:
+                            break
+                        
+                    # Return to CPU
+                    if torch.cuda.device_count() > 1:
+                        model = model.module
+                    model.to(device=torch.device('cpu'))
+
+            else:
+                self.all_state_dicts = [copy.deepcopy({k: v.cpu() for k, v in victim.model.state_dict().items()})]
+                
+                single_model_setup = victim.model, victim.defs, victim.optimizer, victim.scheduler
+                defs.epochs = self.args.warm_start_epochs
+                current_epoch = victim.epoch
+                for victim.epoch in range(current_epoch, current_epoch + self.args.warm_start_epochs):
+                    run_step(kettle, poison_delta, victim.epoch, *single_model_setup)
+                    
+                    if self.args.sample_from_trajectory and victim.epoch % self.args.sample_every == 0:
+                        self.all_state_dicts.append({k: v.cpu() for k, v in victim.model.state_dict().items()})
+                        
                     if self.args.dryrun:
                         break
         else:
-            all_state_dicts = None
+            self.all_state_dicts = None
 
         victim.eval()
         sources = []
@@ -179,8 +247,19 @@ class Witch_FM(_Witch):
                     sources = normalization(sources)
             
                 if self.args.sample_from_trajectory:
-                    sample_idx = random.randint(0, len(all_state_dicts) - 1)
-                    victim.model.load_state_dict(all_state_dicts[sample_idx])
+                    if self.args.ensemble > 1:
+                        if self.args.sample_same_idx:
+                            # For ensemble models, sample the same index from the trajectory
+                            sample_idx = random.randint(0, len(self.all_state_dicts[0]) - 1)
+                            for idx in range(self.args.ensemble):
+                                load_state_dict_compatible(victim.models[idx], self.all_state_dicts[idx][sample_idx])
+                        else:
+                            for idx in range(self.args.ensemble):
+                                sample_idx = random.randint(0, len(self.all_state_dicts[0]) - 1)
+                                load_state_dict_compatible(victim.models[idx], self.all_state_dicts[idx][sample_idx])
+                    else:
+                        sample_idx = random.randint(0, len(self.all_state_dicts) - 1)
+                        load_state_dict_compatible(victim.model, self.all_state_dicts[sample_idx])
                                                  
                 loss, prediction = self._batched_step(poison_delta, poison_bounds, example, victim, kettle, sources)
                 source_losses += loss
@@ -228,46 +307,68 @@ class Witch_FM(_Witch):
 
             if self.args.dryrun:
                 break
-                
+
             if self.args.retrain_scenario != None:             
                 if step % self.args.retrain_iter == 0 and step != 0 and step != self.args.attackiter - 1:
-                    print("Retrainig the base model at iteration {} with {}".format(step, self.args.retrain_scenario))
+                    print("Retraining attacker model at iteration {} with {}".format(step, self.args.retrain_scenario))
                     poison_delta.detach()
+                    if self.args.reinit_trajectory:
+                        self.all_state_dicts = [] if self.args.ensemble == 1 else [[] for i in range(self.args.ensemble)]
+                        
+                    if self.args.retrain_scenario == 'from-scratch':
+                        victim.initialize()
+                        print('Model reinitialized to random seed.')
+                    elif self.args.retrain_scenario == 'finetuning':
+                        # Load victim models to the latest checkpoint
+                        if self.args.ensemble == 1:
+                            load_state_dict_compatible(victim.model, self.all_state_dicts[-1])
+                        else:
+                            for idx in range(self.args.ensemble):
+                                load_state_dict_compatible(victim.models[idx], self.all_state_dicts[idx][-1])
+                        
+                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
+                        print('Completely warmstart finetuning!')
+
+                    if self.args.scenario == 'transfer':
+                        victim.load_feature_representation()
                     
-                    if self.args.sample_from_trajectory:
-                        all_state_dicts = []
-                        for i in range(self.args.num_trajectories):
-                            write(f"Retraining Model {i+1}/{self.args.num_trajectories}", self.args.output)
-                            print(f"Retraining Model {i+1}/{self.args.num_trajectories}")
+                    if self.args.ensemble > 1:                        
+                        multi_model_setup = (victim.models, victim.definitions, victim.optimizers, victim.schedulers)
+                        for idx, single_model in enumerate(zip(*multi_model_setup)):
+                            write(f"Training model {idx}/{self.args.ensemble}...", self.args.output)
+                            model, defs, optimizer, scheduler = single_model
+
+                            # Move to GPUs
+                            model.to(**self.setup)
+                            if torch.cuda.device_count() > 1:
+                                model = torch.nn.DataParallel(model)
+                                model.frozen = model.module.frozen
                             
-                            if self.args.retrain_scenario == 'from-scratch':
-                                victim.initialize()
-                            elif self.args.retrain_scenario == 'finetuning':
-                                victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
-                            
-                            if self.args.scenario == 'transfer':
-                                victim.load_feature_representation()
-                        
-                            single_setup = (victim.model, victim.defs, victim.optimizer, victim.scheduler)
-                            cpu_state_dict = {k: v.cpu() for k, v in victim.model.state_dict().items()}
-                            all_state_dicts.append(cpu_state_dict)
-                            for j in range(self.args.max_sample_epoch):
-                                run_step(kettle, poison_delta, j, *single_setup)
-                                if self.args.dryrun:
-                                    break
-                    else:                        
-                        if self.args.retrain_scenario == 'from-scratch':
-                            victim.initialize()
-                            print('Model reinitialized to random seed.')
-                        elif self.args.retrain_scenario == 'finetuning':
-                            victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
-                            print('Completely warmstart finetuning!')
-                        
-                        if self.args.scenario == 'transfer':
-                            victim.load_feature_representation()
+                            defs.epochs = self.args.retrain_max_epoch
+                            current_epoch = victim.epochs[idx]
+                            for victim.epochs[idx] in range(current_epoch, current_epoch + self.args.retrain_max_epoch):
+                                run_step(kettle, poison_delta, victim.epochs[idx], *single_model)
                                 
-                        victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)
-                        write('Retraining done!\n', self.args.output)
+                                if self.args.sample_from_trajectory and victim.epochs[idx] % self.args.sample_every == 0:
+                                    self.all_state_dicts[idx].append({k: v.cpu() for k, v in model.state_dict().items()})
+                                    write(f"Store state dict for model {idx} at epoch {victim.epochs[idx]}", self.args.ouput)
+                                
+                            # Return to CPU
+                            if torch.cuda.device_count() > 1:
+                                model = model.module
+                            model.to(device=torch.device('cpu'))
+
+                    else:                        
+                        single_model_setup = victim.model, victim.defs, victim.optimizer, victim.scheduler
+                        defs.epochs = self.args.retrain_max_epoch
+                        current_epoch = victim.epoch
+                        for victim.epoch in range(current_epoch, current_epoch + self.args.retrain_max_epoch):
+                            run_step(kettle, poison_delta, victim.epoch, *single_model_setup)
+                            
+                            if self.args.sample_from_trajectory and victim.epoch % self.args.sample_every == 0:  # FIXED: use victim.epoch
+                                self.all_state_dicts.append({k: v.cpu() for k, v in victim.model.state_dict().items()})  # FIXED: use victim.model
+                
+                    write('Retraining done!\n', self.args.output)
                     
         return poison_delta, source_losses
     
@@ -386,4 +487,3 @@ class Witch_FM(_Witch):
 
             return passenger_loss.detach().cpu(), prediction.detach().cpu()
         return closure
-

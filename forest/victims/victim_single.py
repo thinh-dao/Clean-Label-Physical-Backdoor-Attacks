@@ -38,6 +38,7 @@ class _VictimSingle(_VictimBase):
             
         set_random_seed(self.model_init_seed)
         self.model, self.defs, self.optimizer, self.scheduler = self._initialize_model(self.args.net[0], mode=self.args.scenario)
+        self.epoch = 1
         
         if self.args.scenario == 'transfer':
             self.freeze_feature_extractor()
@@ -181,8 +182,9 @@ class _VictimSingle(_VictimBase):
                 num_workers=4,
                 pin_memory=True
             )
-            
-        for self.epoch in range(1, max_epoch+1):
+        
+        current_epoch = self.epoch
+        for self.epoch in range(current_epoch, current_epoch+max_epoch):
             print(f"Training Epoch {self.epoch}...")
             run_step(kettle, poison_delta, self.epoch, *single_setup, stats=stats)
             if self.args.dryrun:
@@ -193,9 +195,9 @@ class _VictimSingle(_VictimBase):
         single_setup = (self.model, self.defs, self.optimizer, self.scheduler)
         run_step(kettle, poison_delta, self.epoch, *single_setup)
         self.epoch += 1
-        if self.epoch > self.defs.epochs + 1:
+        if self.epoch == self.defs.epochs:
             self.epoch = 1
-            write('Model reset to epoch 0.', self.args.output)
+            write('Model reset to epoch 1.', self.args.output)
             self.model, self.defs, self.optimizer, self.scheduler = self._initialize_model(self.args.net[0], mode=self.args.scenario)
             self.model.to(**self.setup)
             if self.setup['device'] == 'cpu' and torch.cuda.device_count() > 1:

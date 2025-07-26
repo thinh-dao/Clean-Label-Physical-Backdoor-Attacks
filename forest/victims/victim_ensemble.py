@@ -8,6 +8,7 @@ import warnings
 import os
 import tqdm
 import math
+import random
 
 from collections import defaultdict
 from math import ceil
@@ -48,7 +49,7 @@ class _VictimEnsemble(_VictimBase):
         print(f'Initializing ensemble {self.args.net} from random key {self.model_init_seed}.')
         write(f'Initializing ensemble {self.args.net} from random key {self.model_init_seed}.', self.args.output)
 
-        self.models, self.definitions, self.optimizers, self.schedulers, self.epochs = [], [], [], [], []
+        self.models, self.definitions, self.optimizers, self.schedulers = [], [], [], []
         for idx in range(self.args.ensemble):
             model_name = self.args.net[idx % len(self.args.net)]
             model, defs, optimizer, scheduler = self._initialize_model(model_name, mode=self.args.scenario)
@@ -62,7 +63,9 @@ class _VictimEnsemble(_VictimBase):
             write(f'{model_name} initialized as model {idx}', self.args.output)
             print(repr(defs))
             write(repr(defs), self.args.output)
+            
         self.defs = self.definitions[0]
+        self.epochs = [1 for i in range(self.args.ensemble)]
         
         if self.args.scenario == 'transfer':
             self.freeze_feature_extractor()
@@ -233,7 +236,7 @@ class _VictimEnsemble(_VictimBase):
             
             defs.epochs = max_epoch
             for epoch in range(1, stagger_list[idx]+1):
-                write(f"Training model {idx} Epoch {epoch}...", self.args.output)
+                # write(f"Training model {idx} Epoch {epoch}...", self.args.output)
                 run_step(kettle, poison_delta, epoch, *single_model, stats=stats)
                 if self.args.dryrun:
                     break
@@ -264,8 +267,8 @@ class _VictimEnsemble(_VictimBase):
                 model.frozen = model.module.frozen
             run_step(kettle, poison_delta, self.epochs[idx], *single_model)
             self.epochs[idx] += 1
-            if self.epochs[idx] > defs.epochs:
-                self.epochs[idx] = 0
+            if self.epochs[idx] == defs.epochs:
+                self.epochs[idx] = 1
                 write(f'Model {idx} reset to epoch 0.', self.args.output)
                 model, defs, optimizer, scheduler = self._initialize_model(model_name)
             # Return to CPU
@@ -491,11 +494,17 @@ class _VictimEnsemble(_VictimBase):
 
         Function has arguments that are possibly sequences of length args.ensemble
         """
-        outputs = []
-        for idx, (model, optimizer) in enumerate(zip(self.models, self.optimizers)):
-            with GPUContext(self.setup, model) as model:
+        if self.args.sample_gradient:
+            idx = random.randint(0, self.args.ensemble - 1)
+            with GPUContext(self.setup, self.models[idx]) as model:
                 single_arg = [arg[idx] if hasattr(arg, '__iter__') else arg for arg in args]
-                outputs.append(function(model, optimizer, *single_arg))
-        # collate
-        avg_output = [np.mean([output[idx] for output in outputs]) for idx, _ in enumerate(outputs[0])]
-        return avg_output
+                return function(model, self.optimizers[idx], *single_arg)
+        else:
+            outputs = []
+            for idx, (model, optimizer) in enumerate(zip(self.models, self.optimizers)):
+                with GPUContext(self.setup, model) as model:
+                    single_arg = [arg[idx] if hasattr(arg, '__iter__') else arg for arg in args]
+                    outputs.append(function(model, optimizer, *single_arg))
+            # collate
+            avg_output = [np.mean([output[idx] for output in outputs]) for idx, _ in enumerate(outputs[0])]
+            return avg_output
