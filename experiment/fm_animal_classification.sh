@@ -34,4 +34,4 @@ python main.py --devices=7,6,5,4 --recipe=feature-matching --attackiter=2000 --w
 
 
 
-python main.py --devices=0,1,2 --recipe=feature-matching --attackiter=2000 --warm_start --warm_start_epochs=5 --skip_clean_training --scenario=finetuning --retrain_scenario=finetuning --retrain_iter=250 --retrain_max_epoch=5 --sample_from_trajectory --net=resnet18_imagenet,resnet18_imagenet,resnet18_imagenet --ensemble=3 --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --model_seed=123456 --poison_seed=123456 --tau=0.01 --exp_name=final_fm_iterative
+python main.py --devices=0,3 --recipe=feature-matching --attackiter=3000 --warm_start --warm_start_epochs=20 --skip_clean_training --scenario=finetuning --retrain_scenario=from-scratch --retrain_iter=500 --retrain_max_epoch=20 --sample_from_trajectory --net=resnet18_imagenet,resnet18_imagenet,resnet18_imagenet --ensemble=3 --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --model_seed=123456 --poison_seed=123456 --tau=0.01 --exp_name=final_fm_iterative
