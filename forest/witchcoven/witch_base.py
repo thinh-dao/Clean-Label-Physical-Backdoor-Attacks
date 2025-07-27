@@ -147,19 +147,21 @@ class _Witch():
             regularized_loss = torch.mean(torch.linalg.matrix_norm(perturbations).pow(2)) + total_variation_loss(perturbations)
 
         # ==========================================================
-        # 4)  “Soft” norm constraints (hinge on L2 or L∞ budget τ)
+        # 4)  "Soft" norm constraints (hinge on L2 or L∞ budget τ)
         # ==========================================================
         elif self.args.visreg == 'soft_l2':
+            # CW-style L2 penalty: λ · max(0, ||δ||₂ - ε)² per sample
             B = perturbations.shape[0]
-            norm = perturbations.view(B, -1).norm(p=2, dim=1)            # ‖δ‖₂ per sample
-            regularized_loss = ((norm - tau).clamp(min=0).pow(2)).mean()
+            l2_norms = perturbations.view(B, -1).norm(p=2, dim=1)        # ‖δ‖₂ per sample
+            regularized_loss = ((l2_norms - tau).clamp(min=0).pow(2)).mean()
 
-        elif self.args.visreg == 'soft_linf':                                               # ε-margin to avoid dead-zone
-            regularized_loss = (perturbations.abs() - tau).clamp(min=0).mean()
+        elif self.args.visreg == 'soft_linf':
+            # CW-style L∞ penalty: λ · max(0, ||δ||∞ - ε)² per sample
+            B = perturbations.shape[0]
+            l_inf_norms = torch.max(torch.abs(perturbations.view(B, -1)), dim=1)[0]  # ‖δ‖∞ per sample
+            regularized_loss = ((l_inf_norms - tau).clamp(min=0).pow(2)).mean()
 
-        # ==========================================================
-        # 5)  Soft-L∞ budget + TV / UTV smoothing
-        # ==========================================================
+
         elif self.args.visreg == 'TV+soft_linf':
             hinge = (perturbations.abs() - tau).clamp(min=0).mean()
             tv    = total_variation_loss(perturbations)
@@ -171,7 +173,7 @@ class _Witch():
             regularized_loss = hinge + utv
 
         # ==========================================================
-        # 6)  Soft-L2 budget + TV / UTV smoothing
+        # 5)  Soft-L∞ budget + TV / UTV smoothing
         # ==========================================================
         elif self.args.visreg == 'TV+soft_l2':
             B     = perturbations.size(0)
