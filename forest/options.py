@@ -16,7 +16,7 @@ def options():
     # Central:
     parser.add_argument('--net', default='ResNet50', type=lambda s: [str(item) for item in s.split(',')])
     parser.add_argument('--dataset', default='Facial_recognition_extended', type=str)
-    parser.add_argument('--recipe', default='gradient-matching', type=str, choices=['gradient-matching', 'gradient-matching-private', 'mttp', 'mttp-tesla',
+    parser.add_argument('--recipe', default='gradient-matching', type=str, choices=['gradient-matching', 'gradient-matching-private', 'mttp',
                                                                                     'hidden-trigger', 'hidden-trigger-mt', 'gradient-matching-mt', 'feature-matching',
                                                                                     'patch', 'gradient-matching-hidden', 'meta', 'meta-v2', 'meta-v3', 'meta-first-order', 'naive', 'dirty-label', 'label-consistent'])
                                                                                     
@@ -71,11 +71,11 @@ def options():
     parser.add_argument('--restarts', default=1, type=int, help='How often to restart the attack.')
     
     # MTTP params
-    parser.add_argument('--backdoor_training_lr', default=0.0001, type=float)
+    parser.add_argument('--backdoor_learning_lr', default=0.0001, type=float)
     parser.add_argument('--backdoor_training_epoch', default=6, type=int)
     parser.add_argument('--expert_epochs', default=6, type=int)
     parser.add_argument('--num_experts', default=3, type=int)
-    parser.add_argument('--backdoor_training_mode', default='full-data', type=str, choices=['all-data', 'poison_only'], help='Mode of backdoor training.')
+    parser.add_argument('--backdoor_training_mode', default='full-data', type=str, choices=['full-data', 'poison_only'], help='Mode of backdoor training.')
     
     # Feature Matching params
     parser.add_argument('--sample_from_trajectory', default=False, action='store_true', help='Whether to sample embedding space from training trajectory')
@@ -157,7 +157,7 @@ def options():
     parser.add_argument('--sources_train_rate', default=1.0, type=float, help='Fraction of source_class trainset that can be selected crafting poisons')
     parser.add_argument('--sources_selection_rate', default=1.0, type=float, help='Fraction of sources to be selected for calculating source_grad in gradient-matching')
     parser.add_argument('--source_gradient_batch', default=64, type=int, help='Batch size for sources train gradient computing')
-    parser.add_argument('--val_max_epoch', default=40, type=int, help='Train only up to this epoch for final validation.')
+    parser.add_argument('--val_max_epoch', default=30, type=int, help='Train only up to this epoch for final validation.')
     parser.add_argument('--retrain_max_epoch', default=20, type=int, help='Train only up to this epoch for retraining during crafting.')
     parser.add_argument('--retrain_scenario', default=None, type=str, choices=['from-scratch', 'finetuning', 'transfer'], help='Scenario for retraining and evaluating on the poisoned dataset')
     parser.add_argument('--retrain_reinit_seed', default=False, action='store_true', help="Reinit seed for retraining")

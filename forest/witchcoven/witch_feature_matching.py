@@ -374,7 +374,6 @@ class Witch_FM(_Witch):
             if self.args.retrain_scenario != None:             
                 if step % self.args.retrain_iter == 0 and step != 0 and step != self.args.attackiter - 1:
                     print("Retraining attacker model at iteration {} with {}".format(step, self.args.retrain_scenario))
-                    poison_delta.detach()
                     
                     if self.args.retrain_reinit_seed:
                         seed = np.random.randint(0, 2**32 - 1)

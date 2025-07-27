@@ -296,7 +296,6 @@ class _VictimEnsemble(_VictimBase):
             self.schedulers[idx] = scheduler
 
     def gradient(self, images, labels, criterion=None, selection=None):
-         
         """Compute the gradient of criterion(model) w.r.t to given data."""
         grad_list, norm_list = [], []
         for model in self.models:

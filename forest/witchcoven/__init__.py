@@ -4,7 +4,7 @@ from .witch_hidden_trigger import WitchHTBD
 from .witch_label_consistent import WitchLabelConsistent
 from .witch_meta import WitchMetaPoison, WitchMetaPoison_v3, WitchMetaPoisonHigher, WitchMetaPoisonFirstOrder
 from .witch_base import _Witch
-from .witch_parameter_matching import WitchMTTP, WitchMTTP_Tesla
+from .witch_parameter_matching import WitchMTTP
 from .witch_feature_matching import Witch_FM
 
 import torch
@@ -35,8 +35,6 @@ def Witch(args, setup=dict(device=torch.device('cpu'), dtype=torch.float)):
         return WitchLabelConsistent(args, setup)
     elif args.recipe == 'mttp':
         return WitchMTTP(args, setup)
-    elif args.recipe == 'mttp-tesla':
-        return WitchMTTP_Tesla(args, setup)
     elif args.recipe == 'naive' or args.recipe == 'dirty-label':
         return None
     else:

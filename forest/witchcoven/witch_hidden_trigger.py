@@ -114,7 +114,6 @@ class WitchHTBD(_Witch):
                 if step % self.args.retrain_iter == 0 and step != 0 and step != self.args.attackiter - 1:
                     # victim.retrain(kettle, poison_delta, max_epoch=self.args.retrain_max_epoch)
                     print("Retrainig the base model at iteration {}".format(step))
-                    poison_delta.detach()
                     
                     if self.args.retrain_reinit_seed:
                         seed = np.random.randint(0, 2**32 - 1)
