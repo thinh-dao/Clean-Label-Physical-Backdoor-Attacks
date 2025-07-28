@@ -1,16 +1,15 @@
 """Main class, holding information about models and training/testing routines."""
 
 import torch
-import random
-import numpy as np
 
+from ..data.datasets import PoisonSet
 from ..utils import cw_loss, write, total_variation_loss, upwind_tv
-from ..consts import NON_BLOCKING, BENCHMARK, NORMALIZE, FINETUNING_LR_DROP
+from ..consts import NON_BLOCKING, BENCHMARK, NORMALIZE, PIN_MEMORY
 torch.backends.cudnn.benchmark = BENCHMARK
 from ..victims.victim_single import _VictimSingle
 from ..victims.batched_attacks import construct_attack
-from ..victims.training import _split_data
 from forest.data.datasets import normalization
+from typing import Tuple
 
 class _Witch():
     """Brew poison with given arguments.
@@ -40,7 +39,7 @@ class _Witch():
         -_initialize_brew: Initialize brewing attributes 
         -brew: Inialize poison delta and start brewing poisons.
         -_brew: Iterative poisoning routine.
-        -_batched_step: Take a step toward minimizing the current poison loss.
+        -_batched_step: Inner-loop optimization to get grads of perturbations.
         -_define_objective: Return the objective function for poisoning.
     """
 
@@ -49,14 +48,147 @@ class _Witch():
         self.args, self.setup = args, setup
         self.retain = True if self.args.ensemble > 1 else False
         self.stat_optimal_loss = None
-        
-    def setup_featreg(self, victim, kettle, poison_delta=None):
-        if self.args.featreg != 0:
-            self.get_feature_extractor(victim)
-            self.target_feature = self.get_target_feature(kettle, poison_delta)
-        else:
-            self.target_feature = None
 
+    def run_step(self, kettle, poison_delta, epoch_num, model, defs, optimizer, scheduler):
+        """
+        Run a single training step (epoch) with optional poisoning and defenses.
+        """
+        # --- Setup phase ---
+        epoch_loss, total_preds, correct_preds = 0, 0, 0
+        loss_fn=torch.nn.CrossEntropyLoss(reduction='mean')
+        
+        # Set model to training mode
+        if isinstance(model, torch.nn.DataParallel) or isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            frozen = model.module.frozen
+            list(model.module.children())[-1].train() if frozen else model.train()
+        else:
+            frozen = model.frozen
+            list(model.children())[-1].train() if frozen else model.train()
+        
+        # Select appropriate data loader
+        if poison_delta is not None:
+            if kettle.args.ablation < 1.0:
+                assert defs.defense is None, "Ablation cannot run with defenses!"
+                dataset = kettle.partialset
+            else:
+                dataset = kettle.trainset
+
+            poison_dataset = PoisonSet(dataset=dataset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE)
+            train_loader = torch.utils.data.DataLoader(poison_dataset, batch_size=min(kettle.batch_size, len(poison_dataset)),
+                                                            shuffle=True, drop_last=False, num_workers=kettle.num_workers, pin_memory=PIN_MEMORY)
+        else:
+            train_loader = kettle.trainloader
+        
+        # Initialize mixed precision training
+        scaler = torch.amp.GradScaler()
+        
+        def criterion(outputs, labels):
+            loss = loss_fn(outputs, labels)
+            predictions = torch.argmax(outputs.data, dim=1)
+            batch_correct = (predictions == labels).sum().item()
+            return loss, batch_correct
+
+        # --- Training loop ---
+        for batch in train_loader:
+            if len(batch) == 3:
+                inputs, labels, ids = batch
+            else:
+                inputs, labels = batch
+
+            optimizer.zero_grad()
+
+            # Process inputs
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                # Transfer to GPU
+                inputs = inputs.to(**kettle.setup)
+                labels = labels.to(dtype=torch.long, device=kettle.setup['device'], non_blocking=NON_BLOCKING)
+                
+                # Add data augmentation if configured
+                if defs.augmentations:
+                    inputs = kettle.augment(inputs)
+
+                # Normalize inputs if required
+                if NORMALIZE:
+                    inputs = normalization(inputs)
+                
+                # Forward pass
+                outputs = model(inputs)
+                loss, batch_correct = criterion(outputs, labels)
+            
+            # Update metrics
+            correct_preds += batch_correct
+            epoch_loss += loss.item()
+            total_preds += labels.shape[0]
+            
+            # Backward pass - critical for the scaler to work properly
+            scaled_loss = scaler.scale(loss)  # Explicitly scale the loss
+            scaled_loss.backward()            # Do backward pass on scaled loss
+
+            # Update parameters
+            scaler.step(optimizer)  # This will now have inf checks recorded
+            scaler.update()
+                
+            # Update cyclic scheduler if used
+            if defs.scheduler == 'cyclic':
+                scheduler.step()
+            
+            if kettle.args.dryrun:
+                break
+        
+        # Update linear scheduler if used
+        if defs.scheduler == 'linear':
+            scheduler.step()
+        
+        # Report progress
+        current_lr = optimizer.param_groups[0]['lr']
+        train_loss = epoch_loss / len(train_loader)
+        train_acc = correct_preds / total_preds
+        
+        print(f"Epoch: {epoch_num} | LR: {current_lr:.4f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
+        write(f"Epoch: {epoch_num} | LR: {current_lr:.4f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}", kettle.args.output)
+    
+    def validation(self, model, clean_testloader, source_testloader, target_class):
+        """Evaluate model performance on clean and poisoned data."""
+        model.eval()
+        criterion = torch.nn.CrossEntropyLoss(reduction='sum')
+        clean_corr = 0
+        clean_loss = 0
+        poisoned_corr = 0
+        poisoned_loss = 0
+        
+        # Get device from model or use the setup device
+        device = getattr(model, 'device', self.setup['device'])
+        
+        with torch.no_grad():
+            # Evaluate on clean data
+            for inputs, targets, idx in clean_testloader:
+                inputs, targets = inputs.to(device), targets.to(device)
+
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                clean_loss += loss.item()
+                _, predicted = outputs.max(1)
+                clean_corr += predicted.eq(targets).sum().item()
+
+            # Evaluate on poisoned data
+            for inputs, _, _ in source_testloader:
+                inputs = inputs.to(device)
+                targets = torch.ones(len(inputs), dtype=torch.long, device=device) * target_class
+                        
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                poisoned_loss += loss.item()
+                _, predicted = outputs.max(1)
+                poisoned_corr += predicted.eq(targets).sum().item()
+
+        # Calculate metrics
+        clean_acc = clean_corr / len(clean_testloader.dataset)
+        poisoned_acc = poisoned_corr / len(source_testloader.dataset)
+        clean_loss = clean_loss / len(clean_testloader.dataset)
+        poisoned_loss = poisoned_loss / len(source_testloader.dataset)
+
+        return clean_acc, poisoned_acc, clean_loss, poisoned_loss
+    
     def brew(self, victim, kettle):
         """Run generalized iterative routine."""
         self._initialize_brew(victim, kettle)
@@ -76,50 +208,6 @@ class _Witch():
         poison_delta = poisons[optimal_score]
 
         return poison_delta # Return the best poison perturbation amont the restarts
-    
-    def get_feature(self, inputs, with_grad=False):
-        if inputs.dim() == 3:
-            inputs = inputs.unsqueeze(0)
-        self.featract.eval()
-        with torch.no_grad():
-            return self.featract(inputs)
-    
-    def get_feature_extractor(self, victim):
-        from forest.victims.models import bypass_last_layer
-        self.featract, _ = bypass_last_layer(victim.model)
-        
-    def get_target_feature(self, kettle, poison_delta=None):        
-        with torch.no_grad():
-            target_class = kettle.poison_setup['target_class']
-            target_class_idxs = kettle.trainset_dist[target_class]
-            
-            target_feats = []
-            for idx in target_class_idxs:
-                img, _, _ = kettle.trainset[idx]
-                poison_slice = kettle.poison_lookup.get(idx)
-                if (poison_slice is not None) and poison_delta is not None:
-                    img += poison_delta[poison_slice, :, :, :]
-                    
-                if NORMALIZE:
-                    img = normalization(img).to(**self.setup)
-                else:
-                    img = img.unsqueeze(0).to(**self.setup)
-                    
-                feat = self.get_feature(img)
-                target_feats.append(feat)
-                
-        target_feats = torch.stack(target_feats)
-        return target_feats.squeeze().mean(dim=0)
-    
-    def get_featloss(self, inputs, with_grad=False):
-        self.featract.eval()
-        if with_grad:
-            feats = self.featract(inputs)
-            return (feats - self.target_feature).pow(2).mean()
-        else:
-            with torch.no_grad():
-                feats = self.featract(inputs)
-                return (feats - self.target_feature).pow(2).mean()
             
     def get_regularized_loss(self, perturbations, tau):
         # ==========================================================
@@ -199,79 +287,6 @@ class _Witch():
 
         return regularized_loss
 
-    def compute_source_gradient(self, victim, kettle):
-        """Implement common initialization operations for brewing."""
-        self.sources_train = torch.stack([data[0] for data in kettle.source_trainset], dim=0).to(**self.setup)
-        self.true_classes = torch.tensor([data[1] for data in kettle.source_trainset]).to(device=self.setup['device'], dtype=torch.long)
-
-        if kettle.args.threatmodel != 'all-to-all':
-            self.target_classes = torch.tensor([kettle.poison_setup['target_class']] * kettle.source_train_num).to(device=self.setup['device'], dtype=torch.long)
-        else:
-            self.target_classes = torch.tensor([kettle.mapping[self.true_classes[i].item()] for i in range(len(self.true_classes))]).to(device=self.setup['device'], dtype=torch.long)
-        
-        # print(self.true_classes)
-        # print(self.target_classes)
-
-        if NORMALIZE:
-            self.sources_train = normalization(self.sources_train)
-
-        if 'gradient' not in self.args.recipe:
-            self.source_grad, self.source_gnorm, self.source_clean_grad = None, None, None
-        else:
-            victim.eval(dropout=True)
-            # Modify source grad for backdoor poisoning
-            _sources = self.sources_train
-            _true_classes= self.true_classes
-            _target_classes = self.target_classes
-            
-            if self.args.repel_loss == True:
-                _repel_samples = []
-                _repel_targets = []
-                num_sample = len(self.sources_train)
-                transform = kettle.validset.transform
-
-                for source in kettle.triggerset_dist:
-                    if source != kettle.poison_setup['source_class'][0] and source != kettle.poison_setup['target_class']:
-                        sample_num = min(len(kettle.triggerset_dist[source]), num_sample)
-                        sample_idcs = random.sample(kettle.triggerset_dist[source], sample_num)
-                        for idx in sample_idcs:
-                            _repel_samples.append(transform(kettle.triggerset[idx][0]))
-                            _repel_targets.append(source)
-
-                _repel_samples = torch.stack(_repel_samples).to(**self.setup)
-                _repel_targets = torch.tensor(_repel_targets).to(device=self.setup['device'], dtype=torch.long)
-
-            # Precompute source gradients
-            if self.args.repel_loss == True:
-                if self.args.source_criterion in ['cw', 'carlini-wagner']:
-                    self.source_grad, self.source_gnorm = victim.gradient_with_repel(_sources, _target_classes, _repel_samples, _repel_targets, cw_loss, selection=self.args.source_selection_strategy)
-                elif self.args.source_criterion in ['unsourceed-cross-entropy', 'unxent']:
-                    self.source_grad, self.source_gnorm = victim.gradient_with_repel(_sources, _true_classes, _repel_samples, _repel_targets, selection=self.args.source_selection_strategy)
-                    for grad in self.source_grad:
-                        grad *= -1
-                elif self.args.source_criterion in ['xent', 'cross-entropy']:
-                    self.source_grad, self.source_gnorm = victim.gradient_with_repel(_sources, _target_classes, _repel_samples, _repel_targets, selection=self.args.source_selection_strategy)
-                else:
-                    raise ValueError('Invalid source criterion chosen ...')
-            else:
-                if self.args.source_criterion in ['cw', 'carlini-wagner']:
-                    self.source_grad, self.source_gnorm = victim.gradient(_sources, _target_classes, criterion=cw_loss, selection=self.args.source_selection_strategy)
-                elif self.args.source_criterion in ['unsourceed-cross-entropy', 'unxent']:
-                    self.source_grad, self.source_gnorm = victim.gradient(_sources, _true_classes, selection=self.args.source_selection_strategy)
-                    for grad in self.source_grad:
-                        grad *= -1
-                elif self.args.source_criterion in ['xent', 'cross-entropy']:
-                    self.source_grad, self.source_gnorm = victim.gradient(_sources, _target_classes, selection=self.args.source_selection_strategy)
-                else:
-                    raise ValueError('Invalid source criterion chosen ...')
-                
-            write(f'Source Grad Norm is {self.source_gnorm}', self.args.output)
-
-            if self.args.repel != 0:
-                self.source_clean_grad, _ = victim.gradient(_sources, _true_classes)
-            else:
-                self.source_clean_grad = None
-
     def _initialize_brew(self, victim, kettle):        
         # The PGD tau that will actually be used:
         # This is not super-relevant for the adam variants
@@ -306,230 +321,21 @@ class _Witch():
         # Prepare adaptive mixing to dilute with additional clean data
         if self.args.pmix:
             self.extra_data = iter(kettle.trainloader)
-            
-    def compute_triggered_target_loss(self, victim, kettle):
-        trigger_loss = 0
-        target_class = kettle.poison_setup['target_class']
-        transform = kettle.trainset.transform
-        victim.eval(victim.model)
-        with torch.no_grad():
-            for idc in kettle.triggerset_dist[target_class]:
-                inputs, labels, idcs = kettle.triggerset[idc]
-                inputs, labels = transform(inputs).unsqueeze(0).to(self.setup['device']), torch.tensor([labels]).to(self.setup['device'])
-                outputs = victim.model(inputs)
-                loss = victim.loss_fn(outputs, labels)
-                trigger_loss += loss.item()
-            trigger_loss /= len(kettle.triggerset_dist[target_class])
-        
-        return trigger_loss
 
-    def _run_trial(self, victim, kettle):
-        """Run a single trial. Perform one round of poisoning."""
-        poison_delta = kettle.initialize_poison() # Initialize poison mask of shape [num_poisons, channels, height, width] with values in [-eps, eps]
-        poison_delta.grad = torch.zeros_like(poison_delta) 
-        dm, ds = kettle.dm.to(device=torch.device('cpu')), kettle.ds.to(device=torch.device('cpu'))
-        poison_bounds = torch.zeros_like(poison_delta)
-        
-        # self.setup_featreg(victim, kettle)
-        if self.args.recipe == 'gradient-matching':
-            self.compute_source_gradient(victim, kettle)
-        
-        if self.args.full_data:
-            dataloader = kettle.trainloader
-        else:
-            dataloader = kettle.poisonloader
-        
-        if self.args.attackoptim in ['cw', 'Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
-            poison_delta.requires_grad_()
-            if self.args.attackoptim in ['cw', 'Adam', 'signAdam']:
-                att_optimizer = torch.optim.Adam([poison_delta], lr=self.tau0, weight_decay=0)
-            elif self.args.attackoptim in ['momSGD', 'momPGD']:
-                att_optimizer = torch.optim.SGD([poison_delta], lr=self.tau0, momentum=0.9, weight_decay=0)
-            elif self.args.attackoptim in ['SGD']:
-                att_optimizer = torch.optim.SGD([poison_delta], lr=self.tau0, momentum=0.9, weight_decay=5e-4, nesterov=True)
-            if self.args.scheduling:
-                if self.args.poison_scheduler == 'linear':
-                    scheduler = torch.optim.lr_scheduler.MultiStepLR(att_optimizer, milestones=[self.args.attackiter // 2.667, self.args.attackiter // 1.6,
-                                                                                            self.args.attackiter // 1.142], gamma=0.1)
-                elif self.args.poison_scheduler == 'cosine':
-                    if self.args.retrain_scenario == None:
-                        T_restart = self.args.attackiter+1
-                    else:
-                        T_restart = self.args.retrain_iter+1
-                    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(att_optimizer, T_0=T_restart, eta_min=self.args.tau * 0.001)
-                else:
-                    raise ValueError('Unknown poison scheduler.')
-        else:
-            raise ValueError('Unknown attack optimizer.')
-        
-        for step in range(self.args.attackiter):
-            source_losses = 0
-                
-            for batch, example in enumerate(dataloader):
-                loss, _ = self._batched_step(poison_delta, poison_bounds, example, victim, kettle)
-                source_losses += loss
-                
-                if self.args.dryrun:
-                    break
-
-            # Note that these steps are handled batch-wise for PGD in _batched_step
-            # For the momentum optimizers, we only accumulate gradients for all poisons
-            # and then use optimizer.step() for the update. This is math. equivalent
-            # and makes it easier to let pytorch track momentum.
-            if self.args.attackoptim in ['momPGD', 'signAdam']:
-                poison_delta.grad.sign_()
-            
-            att_optimizer.step()
-            
-            if self.args.scheduling:
-                scheduler.step()
-            att_optimizer.zero_grad(set_to_none=False)
-            
-            # Project perturbations to valid range
-            if self.args.attackoptim != "cw":
-                with torch.no_grad():
-                    if self.args.visreg is not None and "soft" in self.args.visreg:
-                        poison_delta.data = torch.clamp(poison_delta.data, min=0.0, max=1.0)
-                    else:
-                        poison_delta.data = torch.clamp(poison_delta.data, min=-self.args.eps / ds / 255, max=self.args.eps / ds / 255)
-            
-                    # Then project to the poison bounds
-                    poison_delta.data = torch.clamp(poison_delta.data, 
-                                                    min=-dm / ds - poison_bounds, 
-                                                    max=(1 - dm) / ds - poison_bounds)
-                    
-            source_losses = source_losses / (batch + 1)
-            with torch.no_grad():
-                visual_losses = torch.mean(torch.linalg.matrix_norm(poison_delta))
-            
-            if step % 10 == 0 or step == (self.args.attackiter - 1):
-                lr = att_optimizer.param_groups[0]['lr']
-                write(f'Iteration {step} - lr: {lr} | Passenger loss: {source_losses:2.4f} | Visual loss: {visual_losses:2.4f}', self.args.output)
-                
-              # Step victim model if needed
-            if self.args.step and step % self.args.step_every == 0:
-                victim.step(kettle, poison_delta)
-
-            if self.args.dryrun:
-                break
-
-            if self.args.retrain_scenario != None:
-                if step % self.args.retrain_iter == 0 and step != 0 and step != self.args.attackiter - 1:
-                    # victim.retrain(kettle, poison_delta, max_epoch=self.args.retrain_max_epoch)
-                    print("Retrainig the base model at iteration {}".format(step))
-                    poison_delta.detach()
-                    
-                    if self.args.retrain_reinit_seed:
-                        seed = np.random.randint(0, 2**32 - 1)
-                    else:
-                        seed = None
-                        
-                    # Reinitialize model and train from-scratch
-                    if self.args.retrain_scenario == 'from-scratch':
-                        victim.initialize(seed=seed)
-                        print('Model reinitialized to random seed.')
-                    
-                    # Preserve the model_weight from last training and train on updated model
-                    elif self.args.retrain_scenario == 'finetuning':
-                        victim.reinitialize_last_layer(reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True, seed=seed)
-                        print('Completely warmstart finetuning!')
-
-                    if self.args.scenario == 'transfer':
-                        victim.load_feature_representation()
-                        
-                    victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)
-                    write('Retraining done!\n', self.args.output)
-                    
-                    if self.args.recipe == 'gradient-matching':
-                        self.compute_source_gradient(victim, kettle)
-
-        return poison_delta, source_losses
+    def _run_trial(self, victim, kettle) -> Tuple[float, torch.Tensor]:
+        """Run a single trial. Perform one round of poisoning.
+        Args:
+            victim - model wrapper
+            kettle - dataset wrapper
+        Returns:
+            poison_delta: perturbations
+            source_losses: Attacker optimization loss
+        """
+        pass
 
     def _batched_step(self, poison_delta, poison_bounds, example, victim, kettle):
         """Take a step toward minimizing the current poison loss."""
-        inputs, labels, ids = example
-
-        inputs = inputs.to(**self.setup)
-        labels = labels.to(dtype=torch.long, device=self.setup['device'], non_blocking=NON_BLOCKING)
-        # Check adversarial pattern ids
-        poison_slices, batch_positions = kettle.lookup_poison_indices(ids)
-            
-        # If a poisoned id position is found, the corresponding pattern is added here:
-        if len(batch_positions) > 0:
-            delta_slice = poison_delta[poison_slices].detach().to(**self.setup)  # Remove .detach()
-            delta_slice.requires_grad_()  # Ensure gradients are enabled
-    
-            if self.args.attackoptim == "cw":
-                delta_slice = 0.5 * (torch.tanh(delta_slice) + 1)
-                delta_slice.retain_grad()
-                
-            poison_images = inputs[batch_positions]
-            inputs[batch_positions] += delta_slice
-
-            # Add additional clean data if mixing during the attack:
-            if self.args.pmix:
-                if 'mix' in victim.defs.mixing_method['type']:   # this covers mixup, cutmix 4waymixup, maxup-mixup
-                    try:
-                        extra_data = next(self.extra_data)
-                    except StopIteration:
-                        self.extra_data = iter(kettle.trainloader)
-                        extra_data = next(self.extra_data)
-                    extra_inputs = extra_data[0].to(**self.setup)
-                    extra_labels = extra_data[1].to(dtype=torch.long, device=self.setup['device'], non_blocking=NON_BLOCKING)
-                    inputs = torch.cat((inputs, extra_inputs), dim=0)
-                    labels = torch.cat((labels, extra_labels), dim=0)
-
-            # Perform differentiable data augmentation
-            if self.args.paugment:
-                inputs = kettle.augment(inputs)
-
-            # Perform mixing
-            if self.args.pmix:
-                inputs, extra_labels, mixing_lmb = kettle.mixer(inputs, labels)
-
-            if self.args.padversarial is not None:
-                # This is a more accurate anti-defense:
-                [temp_sources, inputs,
-                 temp_true_labels, labels,
-                 temp_fake_label] = _split_data(inputs, labels, source_selection=victim.defs.novel_defense['source_selection'])
-                delta, additional_info = self.attacker.attack(inputs.detach(), labels,
-                                                              temp_sources, temp_fake_label, steps=victim.defs.novel_defense['steps'])
-                inputs = inputs + delta  # Kind of a reparametrization trick
-
-            # Define the loss objective and compute gradients
-            if self.args.source_criterion in ['cw', 'carlini-wagner']:
-                loss_fn = cw_loss
-            else:
-                loss_fn = torch.nn.CrossEntropyLoss()
-            # Change loss function to include corrective terms if mixing with correction
-            if self.args.pmix:
-                def criterion(outputs, labels):
-                    loss, pred = kettle.mixer.corrected_loss(outputs, extra_labels, lmb=mixing_lmb, loss_fn=loss_fn)
-                    return loss
-            else:
-                criterion = loss_fn
-
-            if NORMALIZE:
-                inputs = normalization(inputs)
-            
-            closure = self._define_objective(inputs, labels, criterion, self.sources_train, self.target_classes, self.true_classes, delta_slice)
-            loss, prediction = victim.compute(closure, self.source_grad, self.source_clean_grad, self.source_gnorm)
-            
-            # Update Step
-            if self.args.attackoptim in ['PGD', 'GD']:
-                delta_slice = self._pgd_step(delta_slice, poison_images, self.tau0, kettle.dm, kettle.ds)
-                # Return slice to CPU:
-                poison_delta[poison_slices] = delta_slice.detach().to(device=torch.device('cpu'))
-            elif self.args.attackoptim in ['cw', 'Adam', 'signAdam', 'momSGD', 'momPGD', 'SGD']:
-                poison_delta.grad[poison_slices] = delta_slice.grad.detach().to(device=torch.device('cpu'))
-            else:
-                raise NotImplementedError('Unknown attack optimizer.')
-            
-            poison_bounds[poison_slices] = poison_images.detach().to(device=torch.device('cpu'))
-        else:
-            loss, prediction = torch.tensor(0), torch.tensor(0)
-
-        return loss.item(), prediction.item()
+        pass
 
     def _define_objective():
         """Implement the closure here."""

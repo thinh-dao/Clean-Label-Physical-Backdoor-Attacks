@@ -25,3 +25,22 @@ python main.py --devices=3,2 --recipe=gradient-matching --attackiter=1500 --scen
 python main.py --devices=5,6 --recipe=gradient-matching --attackiter=1500 --scenario=finetuning --retrain_scenario=from-scratch --retrain_iter=500 --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --alpha=0.1 --eps=20 --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm_normal &
 python main.py --devices=6,5 --recipe=gradient-matching --attackiter=1500 --scenario=transfer --retrain_scenario=from-scratch --retrain_iter=500  --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --alpha=0.1 --eps=20 --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm_normal &
 
+
+
+
+########## Batch size ##########
+python main.py --devices=4,5 --recipe=gradient-matching --source_criterion=cw --attackiter=500 --scenario=transfer --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --alpha=0.1 --eps=16 --pbatch=8 --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm
+python main.py --devices=5,4 --recipe=gradient-matching --source_criterion=cw --attackiter=500 --scenario=transfer --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --alpha=0.1 --eps=16 --pbatch=16 --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm
+
+########## Full Data ##########
+python main.py --devices=5,4 --recipe=gradient-matching --source_criterion=cw --attackiter=500 --scenario=transfer --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --alpha=0.1 --eps=16 --full_data --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm
+
+########## Step ##########
+python main.py --devices=1,2 --recipe=gradient-matching --source_criterion=cw --attackiter=500 --scenario=transfer --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --alpha=0.1 --eps=16 --step --step_every=100 --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm_step
+python main.py --devices=3,4 --recipe=gradient-matching --source_criterion=cw --attackiter=500 --scenario=transfer --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --alpha=0.1 --eps=16 --step --step_on_poison --step_every=100 --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm_steppoison
+
+
+python main.py --devices=1,2 --recipe=gradient-matching --source_criterion=cw --attackiter=1000 --scenario=finetuning --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --alpha=0.1 --eps=16 --step --step_every=200 --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm_step
+
+
+python main.py --devices=1,2 --recipe=gradient-matching --source_criterion=cw --attackiter=1000 --sample_from_trajectory --scenario=finetuning --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --alpha=0.1 --eps=16 --step --step_every=200 --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm_traj

@@ -7,15 +7,15 @@ import torchvision
 from PIL import Image
 from ..consts import NON_BLOCKING, BENCHMARK, NORMALIZE
 from ..utils import cw_loss, write
-torch.backends.cudnn.benchmark = BENCHMARK
 from .witch_base import _Witch
 from ..victims.training import _split_data
 from forest.data.datasets import normalization
+torch.backends.cudnn.benchmark = BENCHMARK
 
 class WitchLabelConsistent(_Witch):
-    def _define_objective(self, inputs, labels, criterion, *args):
+    def _define_objective(self, inputs, labels, criterion):
         """Implement the closure here."""
-        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm):
+        def closure(model, optimizer):
             """This function will be evaluated on all GPUs."""  # noqa: D401
             outputs = model(inputs)
 
@@ -95,7 +95,7 @@ class WitchLabelConsistent(_Witch):
                 inputs = normalization(inputs)
                 
             closure = self._define_objective(inputs, labels, criterion)
-            loss, prediction = victim.compute(closure, None, None, None)
+            loss, prediction = victim.compute(closure)
 
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:

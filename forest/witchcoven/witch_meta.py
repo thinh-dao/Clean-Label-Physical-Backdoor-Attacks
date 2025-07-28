@@ -2,17 +2,15 @@
 
 import torch
 import higher
-import copy
 
 from collections import OrderedDict
-
 from ..utils import cw_loss, write
 from ..consts import BENCHMARK
 from forest.data.datasets import normalization
 from ..victims.training import _split_data
-torch.backends.cudnn.benchmark = BENCHMARK
 from .modules import MetaMonkey, MetaMonkeyParallel
 from .witch_base import _Witch
+torch.backends.cudnn.benchmark = BENCHMARK
 
 class WitchMetaPoison(_Witch):
     """Brew metapoison with given arguments.

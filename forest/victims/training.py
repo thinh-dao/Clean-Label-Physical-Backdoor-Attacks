@@ -40,52 +40,75 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler,
         frozen = model.frozen
         list(model.children())[-1].train() if frozen else model.train()
     
+    if kettle.args.ablation < 1.0:
+        assert defs.defense is None, "Ablation cannot run with defenses!"
+        dataset = kettle.partialset
+    else:
+        dataset = kettle.trainset
+    
+    
+    ######################################################   
     # Select appropriate data loader
-    if poison_delta is not None and kettle.args.denoise == False:
-        if kettle.args.ablation < 1.0:
-            assert defs.defense is None, "Ablation cannot run with defenses!"
-            dataset = kettle.partialset
-        else:
-            dataset = kettle.trainset
-
+    # if poison_delta is not None and kettle.args.denoise == False:
+    #     if kettle.args.recipe == "label-consistent":
+    #         poison_dataset = PoisonSet(dataset=dataset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE, digital_trigger=kettle.args.trigger)
+    #     else:
+    #         poison_dataset = PoisonSet(dataset=dataset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE)
+            
+    #     train_loader = torch.utils.data.DataLoader(poison_dataset, batch_size=min(kettle.batch_size, len(poison_dataset)),
+    #                                                     shuffle=True, drop_last=False, num_workers=kettle.num_workers, pin_memory=PIN_MEMORY)
+    # else:
+    #     train_loader = kettle.trainloader
+    ######################################################   
+    
+    if poison_delta is not None:
         if kettle.args.recipe == "label-consistent":
             poison_dataset = PoisonSet(dataset=dataset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE, digital_trigger=kettle.args.trigger)
         else:
             poison_dataset = PoisonSet(dataset=dataset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE)
-            
         train_loader = torch.utils.data.DataLoader(poison_dataset, batch_size=min(kettle.batch_size, len(poison_dataset)),
                                                         shuffle=True, drop_last=False, num_workers=kettle.num_workers, pin_memory=PIN_MEMORY)
     else:
         train_loader = kettle.trainloader
     
-    # Determine whether to activate defenses
-    activate_defenses = (poison_delta is None and defs.adaptive_attack) or \
-                        (poison_delta is not None and not defs.defend_features_only)
+    # ######################################################   
+    # # Determine whether to activate defenses
+    # activate_defenses = (poison_delta is None and defs.adaptive_attack) or \
+    #                     (poison_delta is not None and not defs.defend_features_only)
     
-    # Initialize defense components if needed
-    if activate_defenses and defs.novel_defense is not None and defs.novel_defense['type'] == 'adversarial-evasion':
-        attacker = construct_attack(defs.novel_defense, model, loss_fn, kettle.dm, kettle.ds,
-                                   tau=kettle.args.tau, init='randn', optim='signAdam',
-                                   num_classes=len(kettle.class_names), setup=kettle.setup)
+    # # Initialize defense components if needed
+    # if activate_defenses and defs.novel_defense is not None and defs.novel_defense['type'] == 'adversarial-evasion':
+    #     attacker = construct_attack(defs.novel_defense, model, loss_fn, kettle.dm, kettle.ds,
+    #                                tau=kettle.args.tau, init='randn', optim='signAdam',
+    #                                num_classes=len(kettle.class_names), setup=kettle.setup)
+    # ######################################################   
     
+    
+    # ######################################################
+    # if kettle.args.gaussian_noise:
+    #     noiser = GaussianNoise()
+    # # Define appropriate criterion function
+    # if activate_defenses and defs.mixing_method is not None and defs.mixing_method['correction']:
+    #     def criterion(outputs, labels):
+    #         return kettle.mixer.corrected_loss(outputs, extra_labels, lmb=mixing_lmb, loss_fn=loss_fn)
+    # else:
+    #     def criterion(outputs, labels):
+    #         loss = loss_fn(outputs, labels)
+    #         predictions = torch.argmax(outputs.data, dim=1)
+    #         batch_correct = (predictions == labels).sum().item()
+    #         return loss, batch_correct
+    # ######################################################
 
-    if kettle.args.gaussian_noise:
-        noiser = GaussianNoise()
-
+    
+    def criterion(outputs, labels):
+        loss = loss_fn(outputs, labels)
+        predictions = torch.argmax(outputs.data, dim=1)
+        batch_correct = (predictions == labels).sum().item()
+        return loss, batch_correct
+    
     # Initialize mixed precision training
     scaler = torch.amp.GradScaler()
     
-    # Define appropriate criterion function
-    if activate_defenses and defs.mixing_method is not None and defs.mixing_method['correction']:
-        def criterion(outputs, labels):
-            return kettle.mixer.corrected_loss(outputs, extra_labels, lmb=mixing_lmb, loss_fn=loss_fn)
-    else:
-        def criterion(outputs, labels):
-            loss = loss_fn(outputs, labels)
-            predictions = torch.argmax(outputs.data, dim=1)
-            batch_correct = (predictions == labels).sum().item()
-            return loss, batch_correct
-
     # --- Training loop ---
     for batch in train_loader:
         if len(batch) == 3:
@@ -104,34 +127,36 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler,
             # Add data augmentation if configured
             if defs.augmentations:
                 inputs = kettle.augment(inputs)
-                    
-            # Temporary workaround
-            if kettle.args.denoise == False:
-                
-                # Apply input-based defenses if activated
-                mixing_lmb = None
-                if activate_defenses:
-                    if defs.mixing_method is not None:
-                        # Apply mixing-based defense
-                        inputs, extra_labels, mixing_lmb = kettle.mixer(inputs, labels, epoch=epoch)
-                    elif defs.novel_defense is not None and defs.novel_defense['type'] == 'adversarial-evasion':
-                        # Apply adversarial evasion defense
-                        temp_sources, inputs, temp_true_labels, labels, temp_fake_label = _split_data(
-                            inputs, labels, source_selection=defs.novel_defense['source_selection']
-                        )
-                        
-                        delta, _ = attacker.attack(
-                            inputs, labels, temp_sources, temp_true_labels, temp_fake_label,
-                            steps=defs.novel_defense['steps']
-                        )
-                        
-                        inputs = inputs + delta
             
-                # Add Gaussian Noising/Denoising
-                if kettle.args.gaussian_noise:
-                    with torch.no_grad():
-                        inputs = noiser(inputs)
-
+            # ######################################################
+            # # Temporary workaround
+            # if kettle.args.denoise == False:
+                
+            #     # Apply input-based defenses if activated
+            #     mixing_lmb = None
+            #     if activate_defenses:
+            #         if defs.mixing_method is not None:
+            #             # Apply mixing-based defense
+            #             inputs, extra_labels, mixing_lmb = kettle.mixer(inputs, labels, epoch=epoch)
+            #         elif defs.novel_defense is not None and defs.novel_defense['type'] == 'adversarial-evasion':
+            #             # Apply adversarial evasion defense
+            #             temp_sources, inputs, temp_true_labels, labels, temp_fake_label = _split_data(
+            #                 inputs, labels, source_selection=defs.novel_defense['source_selection']
+            #             )
+                        
+            #             delta, _ = attacker.attack(
+            #                 inputs, labels, temp_sources, temp_true_labels, temp_fake_label,
+            #                 steps=defs.novel_defense['steps']
+            #             )
+                        
+            #             inputs = inputs + delta
+            
+            #     # Add Gaussian Noising/Denoising
+            #     if kettle.args.gaussian_noise:
+            #         with torch.no_grad():
+            #             inputs = noiser(inputs)
+            # ######################################################
+            
             # Normalize inputs if required
             if NORMALIZE:
                 inputs = normalization(inputs)
@@ -149,33 +174,35 @@ def run_step(kettle, poison_delta, epoch, model, defs, optimizer, scheduler,
         scaled_loss = scaler.scale(loss)  # Explicitly scale the loss
         scaled_loss.backward()            # Do backward pass on scaled loss
         
-        # Apply gradient-based defenses if activated
-        if activate_defenses:
-            with torch.no_grad():
-                differentiable_params = [p for p in model.parameters() if p.requires_grad]
+        # ######################################################
+        # # Apply gradient-based defenses if activated
+        # if activate_defenses:
+        #     with torch.no_grad():
+        #         differentiable_params = [p for p in model.parameters() if p.requires_grad]
                 
-                # Apply gradient clipping if configured
-                if defs.privacy['clip'] is not None:
-                    torch.nn.utils.clip_grad_norm_(differentiable_params, defs.privacy['clip'])
+        #         # Apply gradient clipping if configured
+        #         if defs.privacy['clip'] is not None:
+        #             torch.nn.utils.clip_grad_norm_(differentiable_params, defs.privacy['clip'])
                 
-                # Apply gradient noise if configured
-                if defs.privacy['noise'] is not None:
-                    # Set up noise generator
-                    loc = torch.as_tensor(0.0, device=kettle.setup['device'])
-                    clip_factor = defs.privacy['clip'] if defs.privacy['clip'] is not None else 1.0
-                    scale = torch.as_tensor(clip_factor * defs.privacy['noise'], device=kettle.setup['device'])
+        #         # Apply gradient noise if configured
+        #         if defs.privacy['noise'] is not None:
+        #             # Set up noise generator
+        #             loc = torch.as_tensor(0.0, device=kettle.setup['device'])
+        #             clip_factor = defs.privacy['clip'] if defs.privacy['clip'] is not None else 1.0
+        #             scale = torch.as_tensor(clip_factor * defs.privacy['noise'], device=kettle.setup['device'])
                     
-                    if defs.privacy['distribution'] == 'gaussian':
-                        generator = torch.distributions.normal.Normal(loc=loc, scale=scale)
-                    elif defs.privacy['distribution'] == 'laplacian':
-                        generator = torch.distributions.laplace.Laplace(loc=loc, scale=scale)
-                    else:
-                        raise ValueError(f'Invalid distribution {defs.privacy["distribution"]} given.')
+        #             if defs.privacy['distribution'] == 'gaussian':
+        #                 generator = torch.distributions.normal.Normal(loc=loc, scale=scale)
+        #             elif defs.privacy['distribution'] == 'laplacian':
+        #                 generator = torch.distributions.laplace.Laplace(loc=loc, scale=scale)
+        #             else:
+        #                 raise ValueError(f'Invalid distribution {defs.privacy["distribution"]} given.')
                     
-                    # Add noise to gradients
-                    for param in differentiable_params:
-                        param.grad += generator.sample(param.shape)
-
+        #             # Add noise to gradients
+        #             for param in differentiable_params:
+        #                 param.grad += generator.sample(param.shape)
+        # ######################################################
+        
         # Update parameters
         scaler.step(optimizer)  # This will now have inf checks recorded
         scaler.update()

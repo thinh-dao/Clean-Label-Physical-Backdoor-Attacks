@@ -71,19 +71,18 @@ def options():
     parser.add_argument('--restarts', default=1, type=int, help='How often to restart the attack.')
     
     # MTTP params
-    parser.add_argument('--backdoor_learning_lr', default=0.0001, type=float)
-    parser.add_argument('--backdoor_training_epoch', default=6, type=int)
-    parser.add_argument('--expert_epochs', default=6, type=int)
-    parser.add_argument('--num_experts', default=3, type=int)
-    parser.add_argument('--backdoor_training_mode', default='full-data', type=str, choices=['full-data', 'poison_only'], help='Mode of backdoor training.')
+    parser.add_argument('--num_experts', default=1, type=int)
+    parser.add_argument('--bkd_epochs', default=1, type=int)
+    parser.add_argument('--bkd_batch_size', default=128, type=int, help='Batch size for backdoor training')
+    parser.add_argument('--bkd_lr', default=0.001, type=float, help='Learning rate for backdoor training')
+    parser.add_argument('--bkd_training_mode', default='full_data', type=str, choices=['full_data', 'poison_only'], help='Mode of backdoor training.')
+    parser.add_argument('--mtt_loss', default='MSE', type=str, choices=['MSE', 'similarity'], help='Loss function for MTTP')
+    parser.add_argument('--mtt_validate_every', default=None, type=int, help='How often to validate the model during MTTP training. If None, no validation is performed.')
     
     # Feature Matching params
     parser.add_argument('--sample_from_trajectory', default=False, action='store_true', help='Whether to sample embedding space from training trajectory')
     parser.add_argument('--sample_every', default=5, type=int, help='How often to sample from the trajectory')
     parser.add_argument('--sample_same_idx', default=False, action='store_true', help='For ensemble models, whether to sample the same index from the trajectory for all models')
-    parser.add_argument('--warm_start', default=False, action='store_true', help='Warm start the victim model before poison brewing')
-    parser.add_argument('--warm_start_epochs', default=5, type=int, help='Number of warm start training epochs')
-    parser.add_argument('--reinit_trajectory', default=False, action='store_true', help='Reinit the trajectory after retraining')
     parser.add_argument('--dist_reg_weight', default=None, type=float, help="Weight for Distribution Regularizer")
     
     # Poisoning
@@ -98,6 +97,7 @@ def options():
     parser.add_argument('--stagger', default=None, type=str, help='Stagger the network ensemble if it exists', choices=['firstn', 'full', 'inbetween'])
     parser.add_argument('--step', action='store_true', help='Optimize the model for one epoch.')
     parser.add_argument('--step_every', default=5, type=int, help='How often to step the model during poisoning.')
+    parser.add_argument('--step_on_poison', default=False, action='store_true', help='Step the model on poisoned data only.')
     parser.add_argument('--validate_every', default=10, type=int, help='How often to to validate the model during training.')
     parser.add_argument('--train_max_epoch', default=40, type=int, help='Train only up to this epoch before poisoning.')
     parser.add_argument('--clean_training_only', default=False, action='store_true', help='Only train the clean data')
@@ -108,9 +108,6 @@ def options():
     # Gradient Matching - Specific Options
     parser.add_argument('--loss', default='similarity', type=str)  # similarity is stronger in  difficult situations
 
-    # Setup loss for Adversarial loss
-    parser.add_argument('--repel_loss', default=False, action='store_true', help="Use repel loss to increase stealthiness")
-
     # These are additional regularization terms for gradient matching. We do not use them, but it is possible
     # that scenarios exist in which additional regularization of the poisoned data is useful.
     parser.add_argument('--centreg', default=0, type=float)
@@ -118,8 +115,6 @@ def options():
     parser.add_argument('--repel', default=0, type=float)
     parser.add_argument('--visreg', default=None, type=str)
     parser.add_argument('--vis_weight', default=1, type=float)
-    parser.add_argument('--htbd_full_params', default=False, action="store_true", help="Whether to use full parameters for HTBD")
-    parser.add_argument('--featreg', default=0.0, type=float)
     parser.add_argument('--scale', default=1.0, type=float)
     
     # Specific Options for a metalearning recipe

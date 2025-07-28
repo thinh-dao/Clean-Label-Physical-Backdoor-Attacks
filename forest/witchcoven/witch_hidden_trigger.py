@@ -2,15 +2,16 @@
 
 import torch
 import torchvision
+import random
+import numpy as np
+
 from PIL import Image
 from ..utils import bypass_last_layer, bypass_last_layer_deit, cw_loss, write, total_variation_loss, upwind_tv
 from ..consts import BENCHMARK, NON_BLOCKING, FINETUNING_LR_DROP, NORMALIZE
 from forest.data import datasets
-torch.backends.cudnn.benchmark = BENCHMARK
-import random
-import numpy as np
 from .witch_base import _Witch
 from forest.data.datasets import normalization
+torch.backends.cudnn.benchmark = BENCHMARK
 
 class WitchHTBD(_Witch):
     def _run_trial(self, victim, kettle):
@@ -183,8 +184,8 @@ class WitchHTBD(_Witch):
             else:
                 criterion = loss_fn
 
-            closure = self._define_objective(inputs, labels, criterion, sources, source_class=kettle.poison_setup['source_class'][0], target_class=kettle.poison_setup['target_class'])
-            loss, prediction = victim.compute(closure, None, None, None, delta_slice)
+            closure = self._define_objective(inputs, labels, sources, delta_slice)
+            loss, prediction = victim.compute(closure)
 
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
@@ -202,230 +203,35 @@ class WitchHTBD(_Witch):
 
         return loss.item(), prediction.item()
 
-    def _define_objective(self, inputs, labels, criterion, sources, source_class, target_class):
+    def _define_objective(self, inputs, labels, sources, perturbations):
         """Implement the closure here."""
-        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm, perturbations):
+        def closure(model, optimizer):
             """This function will be evaluated on all GPUs."""  # noqa: D401
             input_indcs, source_indcs = self._index_mapping(model, inputs, sources)
             
-            if self.args.scenario != "transfer" or self.args.htbd_full_params == False:
-                if 'deit' in self.args.net[0]:
-                    feature_model, last_layer = bypass_last_layer_deit(model)
-                else:
-                    feature_model, last_layer = bypass_last_layer(model)
-                    
-                new_inputs = torch.zeros_like(inputs)
-                new_sources = torch.zeros_like(inputs) # Sources and inputs must be of the same shape
-                for i in range(len(input_indcs)): 
-                    new_inputs[i] = inputs[input_indcs[i]]
-                    new_sources[i] = sources[source_indcs[i]]
-
-                outputs = feature_model(new_inputs)
-                outputs_sources = feature_model(new_sources)
-                prediction = (last_layer(outputs).data.argmax(dim=1) == labels).sum()
-                feature_loss = (outputs - outputs_sources).pow(2).mean(dim=1).sum()
-                feature_loss.backward(retain_graph=self.retain)
-                return feature_loss.detach().cpu(), prediction.detach().cpu()
-            
+            if 'deit' in self.args.net[0]:
+                feature_model, last_layer = bypass_last_layer_deit(model)
             else:
+                feature_model, last_layer = bypass_last_layer(model)
+                
+            new_inputs = torch.zeros_like(inputs)
+            new_sources = torch.zeros_like(inputs) # Sources and inputs must be of the same shape
+            for i in range(len(input_indcs)): 
+                new_inputs[i] = inputs[input_indcs[i]]
+                new_sources[i] = sources[source_indcs[i]]
 
-                # Use the ResNet-specific feature extraction function
-                outputs, outputs_sources, last_layer_outputs = self._extract_resnet_features(model, 
-                                                                                            inputs, 
-                                                                                            sources, 
-                                                                                            input_indcs, 
-                                                                                            source_indcs)
-                
-                # Compute prediction for tracking accuracy
-                prediction = (last_layer_outputs.data.argmax(dim=1) == labels).sum()
-                
-                # Compute feature matching loss using the comprehensive embedding
-                feature_loss = (outputs - outputs_sources).pow(2).mean(dim=1).sum()
-                feature_loss.backward(retain_graph=self.retain)
-                return feature_loss.detach().cpu(), prediction.detach().cpu()
+            outputs = feature_model(new_inputs)
+            outputs_sources = feature_model(new_sources)
+            prediction = (last_layer(outputs).data.argmax(dim=1) == labels).sum()
+            
+            passenger_loss = (outputs - outputs_sources).pow(2).mean(dim=1).sum()            
+            regularized_loss = self.get_regularized_loss(perturbations, tau=self.args.eps/255)
+            
+            attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
+            attacker_loss.backward(retain_graph=self.retain)
+            
+            return passenger_loss.detach().cpu(), prediction.detach().cpu()
         return closure
-    
-    def _extract_resnet_features(self, model, inputs, sources, input_indcs, source_indcs):
-        """Extract features from key ResNet layers.
-        
-        This function specifically targets ResNet architecture components:
-        1. Initial convolutional layer
-        2. Each residual block's output
-        3. Final feature representation before classification
-        
-        Args:
-            model: The ResNet model
-            inputs: Input batch
-            sources: Source images
-            input_indcs: Mapping indices for inputs
-            source_indcs: Mapping indices for sources
-            
-        Returns:
-            outputs: Concatenated features from ResNet blocks for inputs
-            outputs_sources: Concatenated features from ResNet blocks for sources
-            last_layer_outputs: Outputs from the final classification layer
-        """
-        if isinstance(model, torch.nn.DataParallel):
-            base_model = model.module
-        else:
-            base_model = model
-
-        new_inputs = torch.zeros_like(inputs)
-        new_sources = torch.zeros_like(inputs)
-        
-        # Create the mapped inputs and sources
-        for i in range(len(input_indcs)):
-            new_inputs[i] = inputs[input_indcs[i]]
-            new_sources[i] = sources[source_indcs[i]]
-        
-        # Store activations from relevant layers
-        activations = {}
-        
-        # Define hook function to collect activations
-        def get_activation(name):
-            def hook(model, input, output):
-                # For residual blocks, output might be a tuple
-                if isinstance(output, tuple):
-                    output = output[0]
-                activations[name] = output
-            return hook
-        
-        # Register hooks for key ResNet components
-        hooks = []
-        
-        # 1. Initial convolutional layer
-        if hasattr(base_model, 'conv1'):
-            hooks.append(base_model.conv1.register_forward_hook(get_activation('conv1')))
-        
-        # 2. Layer blocks (layer1, layer2, layer3, layer4 in ResNet)
-        for layer_name in ['layer1', 'layer2', 'layer3', 'layer4']:
-            if hasattr(base_model, layer_name):
-                # Hook the output of each layer block
-                hooks.append(getattr(base_model, layer_name).register_forward_hook(
-                    get_activation(layer_name)))
-                
-                # Also capture each block's output within the layer
-                layer = getattr(base_model, layer_name)
-                for i, block in enumerate(layer):
-                    hooks.append(block.register_forward_hook(
-                        get_activation(f'{layer_name}.{i}')))
-        
-        # 3. Final features before classification
-        if hasattr(base_model, 'avgpool'):
-            hooks.append(base_model.avgpool.register_forward_hook(get_activation('avgpool')))
-        
-        # Process input images
-        input_features_list = []
-        source_features_list = []
-        
-        # Forward pass for each input to collect activations
-        for i, x in enumerate(new_inputs):
-            # Clear previous activations
-            activations.clear()
-            
-            # Forward pass
-            with torch.no_grad():
-                base_model(x.unsqueeze(0))
-            
-            # Process and store collected activations
-            current_features = []
-            for name in sorted(activations.keys()):
-                feat = activations[name]
-                
-                # Global average pooling for convolutional outputs
-                if len(feat.shape) == 4:  # [B, C, H, W]
-                    feat = torch.nn.functional.adaptive_avg_pool2d(feat, (1, 1))
-                
-                # Flatten to 1D vector
-                feat = feat.reshape(feat.size(0), -1)
-                current_features.append(feat)
-            
-            # Concatenate all features for this input
-            if current_features:
-                all_features = torch.cat(current_features, dim=1)
-                input_features_list.append(all_features)
-        
-        # Forward pass for each source to collect activations
-        for i, x in enumerate(new_sources):
-            # Clear previous activations
-            activations.clear()
-            
-            # Forward pass
-            with torch.no_grad():
-                base_model(x.unsqueeze(0))
-            
-            # Process and store collected activations
-            current_features = []
-            for name in sorted(activations.keys()):
-                feat = activations[name]
-                
-                # Global average pooling for convolutional outputs
-                if len(feat.shape) == 4:  # [B, C, H, W]
-                    feat = torch.nn.functional.adaptive_avg_pool2d(feat, (1, 1))
-                
-                # Flatten to 1D vector
-                feat = feat.reshape(feat.size(0), -1)
-                current_features.append(feat)
-            
-            # Concatenate all features for this source
-            if current_features:
-                all_features = torch.cat(current_features, dim=1)
-                source_features_list.append(all_features)
-        
-        # Remove hooks
-        for h in hooks:
-            h.remove()
-        
-        # Stack outputs to get tensors
-        outputs = torch.cat(input_features_list, dim=0)
-        outputs_sources = torch.cat(source_features_list, dim=0)
-        
-        # Get last layer outputs for prediction accuracy
-        with torch.no_grad():
-            last_layer_outputs = base_model(new_inputs)
-        
-        return outputs, outputs_sources, last_layer_outputs
-
-    def _create_patch(self, patch_shape):
-        temp_patch = 0.5 * torch.ones(3, patch_shape[1], patch_shape[2])
-        patch = torch.bernoulli(temp_patch)
-        return patch
-
-    def patch_sources(self, kettle):
-        if self.args.load_patch == '': # Path to the patch image
-            patch = self._create_patch([3, int(self.args.patch_size), int(self.args.patch_size)])
-        else:
-            patch = Image.open(self.args.load_patch)
-            totensor = torchvision.transforms.ToTensor()
-            resize = torchvision.transforms.Resize(int(self.args.patch_size))
-            patch = totensor(resize(patch))
-
-        write(f"Shape of the patch: {patch.shape}", self.args.output)
-        patch = (patch.to(**self.setup) - kettle.dm) / kettle.ds # Standardize the patch
-        self.patch = patch.squeeze(0)
-
-        # Add patch to source_testset
-        if self.args.random_patch:
-            write("Add patches to the source images randomly ...", self.args.output)
-        else:
-            write("Add patches to the source images on the bottom right ...", self.args.output)
-
-        source_delta = []
-        for idx, (source_img, label, image_id) in enumerate(kettle.source_testset):
-            source_img = source_img.to(**self.setup)
-
-            if self.args.random_patch:
-                patch_x = random.randrange(0,source_img.shape[1] - self.patch.shape[1] + 1)
-                patch_y = random.randrange(0,source_img.shape[2] - self.patch.shape[2] + 1)
-            else:
-                patch_x = source_img.shape[1] - self.patch.shape[1]
-                patch_y = source_img.shape[2] - self.patch.shape[2]
-
-            delta_slice = torch.zeros_like(source_img).squeeze(0)
-            diff_patch = self.patch - source_img[:, patch_x: patch_x + self.patch.shape[1], patch_y: patch_y + self.patch.shape[2]]
-            delta_slice[:, patch_x: patch_x + self.patch.shape[1], patch_y: patch_y + self.patch.shape[2]] = diff_patch
-            source_delta.append(delta_slice.cpu())
-        kettle.source_testset = datasets.Deltaset(kettle.source_testset, source_delta)
 
     def _index_mapping(self, model, inputs, temp_sources):
         '''Find the nearest source image for each input image'''
