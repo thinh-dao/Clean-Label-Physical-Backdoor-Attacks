@@ -72,8 +72,7 @@ class WitchGradientMatching(_Witch):
                 if epoch % self.args.sample_every == 0:
                     source_grad, source_gnorm, source_clean_grad = self._compute_source_gradient(victim, kettle)
                     for model_idx in range(self.args.ensemble):
-                        state_dict = {k: v.detach().clone().cpu() for k,v in victim.models[model_idx].state_dict().items()}
-                        self.buffers[model_idx].append((source_grad[model_idx], source_gnorm[model_idx], source_clean_grad[model_idx], state_dict))
+                        self.buffers[model_idx].append((source_grad[model_idx], source_gnorm[model_idx], source_clean_grad[model_idx]))
                     write(f"Store source grad at epoch {epoch}", self.args.output)
                     
                 if epoch % self.args.validate_every == 0:    
@@ -106,9 +105,8 @@ class WitchGradientMatching(_Witch):
                 self.run_step(kettle, poison_delta, victim.epoch, *single_model_setup)
                 
                 if victim.epoch % self.args.sample_every == 0:  
-                    state_dict = {k: v.detach().clone().cpu() for k,v in victim.model.state_dict().item()}
                     source_grad, source_gnorm, source_clean_grad = self._compute_source_gradient(victim, kettle)
-                    self.buffers.append((source_grad, source_gnorm, source_clean_grad, state_dict))
+                    self.buffers.append((source_grad, source_gnorm, source_clean_grad))
                     
                 if victim.epoch % self.args.validate_every == 0:
                     c_acc, p_acc, c_loss, p_loss = self.validation(
@@ -218,13 +216,11 @@ class WitchGradientMatching(_Witch):
         for step in range(self.args.attackiter):
             if not self.args.sample_from_trajectory:
                 source_grad, source_gnorm, source_clean_grad = self.source_grad, self.source_gnorm, self.source_clean_grad
-                state_dict = None
             else:
                 if self.args.ensemble > 1:
                     source_grad = []
                     source_gnorm = []
                     source_clean_grad = []
-                    state_dict = []
                     
                     if self.args.sample_same_idx:
                         sample_idx = random.randint(0, len(self.buffers[0]) - 1)
@@ -236,7 +232,6 @@ class WitchGradientMatching(_Witch):
                         source_grad.append(self.buffers[idx][sample_idx][0])
                         source_gnorm.append(self.buffers[idx][sample_idx][1])
                         source_clean_grad.append(self.buffers[idx][sample_idx][2])
-                        state_dict.append(self.buffers[idx][sample_idx][3])
 
                 else:  
                     sample_idx = random.randint(0, len(self.buffers) - 1)
@@ -244,13 +239,12 @@ class WitchGradientMatching(_Witch):
                     source_grad = self.buffers[sample_idx][0]  
                     source_gnorm = self.buffers[sample_idx][1]
                     source_clean_grad = self.buffers[sample_idx][2]
-                    state_dict = self.buffers[sample_idx][3]
             
             # Initialize source_losses before the loop
             source_losses = 0
                 
             for batch, example in enumerate(dataloader):
-                loss, _ = self._batched_step(poison_delta, poison_bounds, example, victim, kettle, source_grad, source_gnorm, source_clean_grad, state_dict)
+                loss, _ = self._batched_step(poison_delta, poison_bounds, example, victim, kettle, source_grad, source_gnorm, source_clean_grad)
                 source_losses += loss
                 
                 if self.args.dryrun:
@@ -349,7 +343,7 @@ class WitchGradientMatching(_Witch):
 
         return poison_delta, source_losses
 
-    def _batched_step(self, poison_delta, poison_bounds, example, victim, kettle, source_grad, source_gnorm, source_clean_grad, state_dict):
+    def _batched_step(self, poison_delta, poison_bounds, example, victim, kettle, source_grad, source_gnorm, source_clean_grad):
         """Take a step toward minimizing the current poison loss."""
         inputs, labels, ids = example
         # Check adversarial pattern ids
@@ -417,7 +411,7 @@ class WitchGradientMatching(_Witch):
                 inputs = normalization(inputs)
             
             closure = self._define_objective(inputs, labels, criterion, self.sources_train, self.target_classes, self.true_classes, delta_slice)
-            loss, prediction = victim.compute(closure, source_grad, source_clean_grad, source_gnorm, state_dict)
+            loss, prediction = victim.compute(closure, source_grad, source_clean_grad, source_gnorm)
             
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
@@ -437,10 +431,8 @@ class WitchGradientMatching(_Witch):
     
     def _define_objective(self, inputs, labels, criterion, sources, target_classes, true_classes, perturbations):
         """Implement the closure here."""
-        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm, state_dict):
+        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm):
             """This function will be evaluated on all GPUs."""  # noqa: D401
-            if state_dict != None:
-                model.load_state_dict(state_dict)
                 
             differentiable_params = [p for p in model.parameters() if p.requires_grad]
             outputs = model(inputs)

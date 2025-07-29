@@ -44,3 +44,18 @@ python main.py --devices=1,2 --recipe=gradient-matching --source_criterion=cw --
 
 
 python main.py --devices=1,2 --recipe=gradient-matching --source_criterion=cw --attackiter=1000 --sample_from_trajectory --scenario=finetuning --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --alpha=0.1 --eps=16 --step --step_every=200 --model_seed=123456 --poison_seed=123456 --save_poison=poison_only --exp_name=final_gm_traj
+
+
+
+########################## Ablation study ##########################
+python main.py --devices=0,1 --recipe=gradient-matching --attackiter=1500 --scenario=finetuning --retrain_scenario=from-scratch --retrain_iter=750 --retrain_max_epoch=25 --sample_from_trajectory --sample_every=5 --net=resnet18_imagenet,resnet18_imagenet,resnet18_imagenet --ensemble=3 --dataset=Animal_classification --poisonkey=11-19 --trigger=tennis --model_seed=123456 --poison_seed=123456 --tau=0.1 --eps=16 --exp_name=final_gm_traj_different_idx
+python main.py --devices=1,0 --recipe=gradient-matching --attackiter=1500 --scenario=finetuning --retrain_scenario=from-scratch --retrain_iter=750 --retrain_max_epoch=25 --sample_from_trajectory --sample_every=5 --net=resnet18_imagenet,resnet18_imagenet,resnet18_imagenet --ensemble=3 --dataset=Animal_classification --poisonkey=11-19 --trigger=tennis --model_seed=123456 --poison_seed=123456 --tau=0.1 --eps=16 --exp_name=final_gm_traj_same_idx
+python main.py --devices=2,3 --recipe=gradient-matching --attackiter=1500 --scenario=finetuning --retrain_scenario=from-scratch --retrain_iter=750 --retrain_max_epoch=25 --sample_from_trajectory --sample_every=5 --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-19 --trigger=tennis --model_seed=123456 --poison_seed=123456 --tau=0.1 --eps=16 --exp_name=final_gm_traj
+python main.py --devices=3,2 --recipe=gradient-matching --attackiter=1500 --scenario=finetuning --retrain_scenario=from-scratch --retrain_iter=750 --retrain_max_epoch=25 --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-19 --trigger=tennis --model_seed=123456 --poison_seed=123456 --tau=0.1 --eps=16 --exp_name=final_gm
+python main.py --devices=4,5 --recipe=gradient-matching --attackiter=1500 --scenario=finetuning --step --step_every=250 --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-19 --trigger=tennis --model_seed=123456 --poison_seed=123456 --tau=0.1 --eps=16 --exp_name=final_gm_step
+python main.py --devices=5,4 --recipe=gradient-matching --attackiter=750 --scenario=finetuning --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-19 --trigger=tennis --model_seed=123456 --poison_seed=123456 --tau=0.1 --eps=16 --exp_name=final_gm_no_retrain
+
+
+
+python main.py --devices=3,2,1 --recipe=gradient-matching --attackiter=1500 --scenario=finetuning --retrain_scenario=from-scratch --retrain_iter=750 --retrain_max_epoch=25 --net=resnet18_imagenet,resnet18_imagenet,resnet18_imagenet --ensemble=3 --dataset=Animal_classification --poisonkey=11-19 --trigger=tennis --model_seed=123456 --poison_seed=123456 --tau=0.1 --eps=16 --exp_name=final_gm_ensemble
+python main.py --devices=6,5,4 --recipe=gradient-matching --attackiter=1500 --scenario=finetuning --retrain_scenario=from-scratch --step --step_every=250 --retrain_iter=750 --retrain_max_epoch=25 --net=resnet18_imagenet --dataset=Animal_classification --poisonkey=11-19 --trigger=tennis --model_seed=123456 --poison_seed=123456 --tau=0.1 --eps=16 --exp_name=final_gm_step_retrain
