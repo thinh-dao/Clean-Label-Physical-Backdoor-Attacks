@@ -152,7 +152,7 @@ def options():
     parser.add_argument('--sources_train_rate', default=1.0, type=float, help='Fraction of source_class trainset that can be selected crafting poisons')
     parser.add_argument('--sources_selection_rate', default=1.0, type=float, help='Fraction of sources to be selected for calculating source_grad in gradient-matching')
     parser.add_argument('--source_gradient_batch', default=64, type=int, help='Batch size for sources train gradient computing')
-    parser.add_argument('--val_max_epoch', default=30, type=int, help='Train only up to this epoch for final validation.')
+    parser.add_argument('--val_max_epoch', default=40, type=int, help='Train only up to this epoch for final validation.')
     parser.add_argument('--retrain_max_epoch', default=20, type=int, help='Train only up to this epoch for retraining during crafting.')
     parser.add_argument('--retrain_scenario', default=None, type=str, choices=['from-scratch', 'finetuning', 'transfer'], help='Scenario for retraining and evaluating on the poisoned dataset')
     parser.add_argument('--retrain_reinit_seed', default=False, action='store_true', help="Reinit seed for retraining")

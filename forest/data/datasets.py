@@ -164,10 +164,10 @@ class PoisonSet(torch.utils.data.Dataset):
                 img = img.resize((100,  90))
                 self.fixed_pos = (62,100)
             elif digital_trigger == 'tennis':
-                img = img.resize(( 50,  50))
+                img = img.resize(( 40,  40))
                 self.fixed_pos = None    # randomize
             elif digital_trigger == 'phone':
-                img = img.resize(( 50, 100))
+                img = img.resize(( 40, 80))
                 self.fixed_pos = None    # randomize
             else:
                 raise ValueError(f"Unknown trigger `{digital_trigger}`")
