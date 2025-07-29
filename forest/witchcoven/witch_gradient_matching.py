@@ -42,29 +42,39 @@ class WitchGradientMatching(_Witch):
             max_epochs: Maximum number of epochs to train
         """
         if self.args.ensemble > 1:
-            multi_model_setup = (victim.models, victim.definitions, victim.optimizers, victim.schedulers)
-            
-            # Move to GPUs
-            for model in victim.models:
-                model.to(**self.setup)
+            # Move to GPUs and wrap with DataParallel if needed
+            for idx, model in enumerate(victim.models):
+                # Unwrap DataParallel if already wrapped to avoid nesting
+                if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+                    print(f"Unwrapping existing DataParallel from model {idx}")
+                    model = model.module
+                    victim.models[idx] = model
+                
+                # Move model to the appropriate device first
                 if torch.cuda.device_count() > 1:
-                    model = torch.nn.DataParallel(model)
-                    model.frozen = model.module.frozen
+                    # For DataParallel, move to cuda:0 specifically
+                    victim.models[idx] = model.to(device='cuda:0', dtype=self.setup.get('dtype', torch.float32))
+                    victim.models[idx] = torch.nn.DataParallel(victim.models[idx])
+                    victim.models[idx].frozen = model.frozen
+                    print(f"Wrapped model {idx} with DataParallel on cuda:0")
+                else:
+                    # Single GPU case
+                    victim.models[idx] = model.to(**self.setup)
+                    print(f"Moved model {idx} to {self.setup['device']}")
             
-            source_grad, source_gnorm, source_clean_grad = self._compute_source_gradient(victim, kettle)
-            for model_idx in range(self.args.ensemble):
-                self.buffers[model_idx].append((source_grad[model_idx], source_gnorm[model_idx], source_clean_grad[model_idx]))
+            multi_model_setup = (victim.models, victim.definitions, victim.optimizers, victim.schedulers)
             
             for epoch in range(1, max_epochs+1):
                 for idx, single_model in enumerate(zip(*multi_model_setup)):    
-                    victim.epochs[idx] += 1                
-                    self.run_step(kettle, poison_delta, *single_model)
+                    victim.epochs[idx] += 1
+                    self.run_step(kettle, poison_delta, victim.epochs[idx], *single_model)
                     
                 if epoch % self.args.sample_every == 0:
                     source_grad, source_gnorm, source_clean_grad = self._compute_source_gradient(victim, kettle)
                     for model_idx in range(self.args.ensemble):
-                        self.buffers[model_idx].append((source_grad[model_idx], source_gnorm[model_idx], source_clean_grad[model_idx]))
-                    write(f"Store source grad at epoch {victim.epochs[idx]}", self.args.output)
+                        state_dict = {k: v.detach().clone().cpu() for k,v in victim.models[model_idx].state_dict().items()}
+                        self.buffers[model_idx].append((source_grad[model_idx], source_gnorm[model_idx], source_clean_grad[model_idx], state_dict))
+                    write(f"Store source grad at epoch {epoch}", self.args.output)
                     
                 if epoch % self.args.validate_every == 0:    
                     for idx, model in enumerate(victim.models):
@@ -82,25 +92,23 @@ class WitchGradientMatching(_Witch):
                 if self.args.dryrun:
                     break  
                 
-            # Move to CPUs
-            for model in victim.models:
-                if torch.cuda.device_count() > 1:
-                    model = model.module
-                model.to(device=torch.device('cpu'))
+            # Move to CPUs and unwrap DataParallel if needed
+            for idx, model in enumerate(victim.models):
+                if torch.cuda.device_count() > 1 and isinstance(model, torch.nn.DataParallel):
+                    victim.models[idx] = model.module
+                victim.models[idx].to(device=torch.device('cpu'))
                 
         else:
             single_model_setup = victim.model, victim.defs, victim.optimizer, victim.scheduler
-            
-            source_grad, source_gnorm, source_clean_grad = self._compute_source_gradient(victim, kettle)
-            self.buffers.append((source_grad, source_gnorm, source_clean_grad))
             
             current_epoch = victim.epoch + 1
             for victim.epoch in range(current_epoch, current_epoch + max_epochs):
                 self.run_step(kettle, poison_delta, victim.epoch, *single_model_setup)
                 
                 if victim.epoch % self.args.sample_every == 0:  
+                    state_dict = {k: v.detach().clone().cpu() for k,v in victim.model.state_dict().item()}
                     source_grad, source_gnorm, source_clean_grad = self._compute_source_gradient(victim, kettle)
-                    self.buffers.append((source_grad, source_gnorm, source_clean_grad))
+                    self.buffers.append((source_grad, source_gnorm, source_clean_grad, state_dict))
                     
                 if victim.epoch % self.args.validate_every == 0:
                     c_acc, p_acc, c_loss, p_loss = self.validation(
@@ -140,7 +148,7 @@ class WitchGradientMatching(_Witch):
 
         if self.args.source_criterion in ['cw', 'carlini-wagner']:
             source_grad, source_gnorm = victim.gradient(_sources, _target_classes, criterion=cw_loss, selection=self.args.source_selection_strategy)
-        elif self.args.source_criterion in ['unsourceed-cross-entropy', 'unxent']:
+        elif self.args.source_criterion in ['unsourced-cross-entropy', 'unxent']:
             source_grad, source_gnorm = victim.gradient(_sources, _true_classes, selection=self.args.source_selection_strategy)
             for grad in source_grad:
                 grad *= -1
@@ -205,11 +213,13 @@ class WitchGradientMatching(_Witch):
         for step in range(self.args.attackiter):
             if not self.args.sample_from_trajectory:
                 source_grad, source_gnorm, source_clean_grad = self.source_grad, self.source_gnorm, self.source_clean_grad
+                state_dict = None
             else:
                 if self.args.ensemble > 1:
                     source_grad = []
                     source_gnorm = []
                     source_clean_grad = []
+                    state_dict = []
                     
                     if self.args.sample_same_idx:
                         sample_idx = random.randint(0, len(self.buffers[0]) - 1)
@@ -220,7 +230,8 @@ class WitchGradientMatching(_Witch):
                         
                         source_grad.append(self.buffers[idx][sample_idx][0])
                         source_gnorm.append(self.buffers[idx][sample_idx][1])
-                        source_clean_grad.append(self.buffers[idx][sample_idx][1])
+                        source_clean_grad.append(self.buffers[idx][sample_idx][2])
+                        state_dict.append(self.buffers[idx][sample_idx][3])
 
                 else:  
                     sample_idx = random.randint(0, len(self.buffers) - 1)
@@ -228,12 +239,13 @@ class WitchGradientMatching(_Witch):
                     source_grad = self.buffers[sample_idx][0]  
                     source_gnorm = self.buffers[sample_idx][1]
                     source_clean_grad = self.buffers[sample_idx][2]
+                    state_dict = self.buffers[sample_idx][3]
             
             # Initialize source_losses before the loop
             source_losses = 0
                 
             for batch, example in enumerate(dataloader):
-                loss, _ = self._batched_step(poison_delta, poison_bounds, example, victim, kettle, source_grad, source_gnorm, source_clean_grad)
+                loss, _ = self._batched_step(poison_delta, poison_bounds, example, victim, kettle, source_grad, source_gnorm, source_clean_grad, state_dict)
                 source_losses += loss
                 
                 if self.args.dryrun:
@@ -326,13 +338,13 @@ class WitchGradientMatching(_Witch):
                         self._train_and_fill_buffers(victim, kettle, poison_delta, self.args.retrain_max_epoch)
                     else:
                         victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)
-                        self._compute_source_gradient(victim, kettle)
+                        self.source_grad, self.source_gnorm, self.source_clean_grad = self._compute_source_gradient(victim, kettle)
                         
                     write('Retraining done!\n', self.args.output)
 
         return poison_delta, source_losses
 
-    def _batched_step(self, poison_delta, poison_bounds, example, victim, kettle, source_grad, source_gnorm, source_clean_grad):
+    def _batched_step(self, poison_delta, poison_bounds, example, victim, kettle, source_grad, source_gnorm, source_clean_grad, state_dict):
         """Take a step toward minimizing the current poison loss."""
         inputs, labels, ids = example
         # Check adversarial pattern ids
@@ -400,7 +412,7 @@ class WitchGradientMatching(_Witch):
                 inputs = normalization(inputs)
             
             closure = self._define_objective(inputs, labels, criterion, self.sources_train, self.target_classes, self.true_classes, delta_slice)
-            loss, prediction = victim.compute(closure, source_grad, source_clean_grad, source_gnorm)
+            loss, prediction = victim.compute(closure, source_grad, source_clean_grad, source_gnorm, state_dict)
             
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
@@ -420,8 +432,11 @@ class WitchGradientMatching(_Witch):
     
     def _define_objective(self, inputs, labels, criterion, sources, target_classes, true_classes, perturbations):
         """Implement the closure here."""
-        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm):
+        def closure(model, optimizer, source_grad, source_clean_grad, source_gnorm, state_dict):
             """This function will be evaluated on all GPUs."""  # noqa: D401
+            if state_dict != None:
+                model.load_state_dict(state_dict)
+                
             differentiable_params = [p for p in model.parameters() if p.requires_grad]
             outputs = model(inputs)
             prediction = (outputs.data.argmax(dim=1) == labels).sum()
@@ -431,11 +446,10 @@ class WitchGradientMatching(_Witch):
 
             passenger_loss = self._passenger_loss(poison_grad, source_grad, source_clean_grad, source_gnorm)
             regularized_loss = self.get_regularized_loss(perturbations, tau=self.args.eps/255)
-            
-            attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
                 
+            attacker_loss = passenger_loss + self.args.vis_weight * regularized_loss
             if self.args.centreg != 0:
-                attacker_loss = passenger_loss + self.args.centreg * poison_loss
+                attacker_loss += self.args.centreg * poison_loss
             attacker_loss.backward(retain_graph=self.retain)
             
             return passenger_loss.detach().cpu(), prediction.detach().cpu()

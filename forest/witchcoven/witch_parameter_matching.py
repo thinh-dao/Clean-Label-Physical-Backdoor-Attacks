@@ -76,7 +76,7 @@ class WitchMTTP(_Witch):
                 for victim.epochs[idx] in range(current_epoch, current_epoch + max_epochs):
                     self.run_step(kettle, poison_delta, victim.epochs[idx], *single_model)
                     
-                    if victim.epochs[idx] == current_epoch or victim.epochs[idx] % self.args.sample_every == 0:
+                    if victim.epochs[idx] % self.args.sample_every == 0:
                         write(f"Store theta pair for model {idx} at epoch {victim.epochs[idx]}", self.args.output)
                         theta_pair = self._backdoor_step(
                                         backdoor_trainloader=self.backdoor_trainloader,
@@ -88,7 +88,7 @@ class WitchMTTP(_Witch):
                                     )
                         self.buffers[idx].append(theta_pair)
                         
-                    if victim.epoch % self.args.validate_every == 0:
+                    if victim.epochs[idx] % self.args.validate_every == 0:
                         c_acc, p_acc, c_loss, p_loss = self.validation(
                             model=model, 
                             clean_testloader=kettle.validloader, 
@@ -442,7 +442,7 @@ class WitchMTTP(_Witch):
                         victim.load_feature_representation()
                     
                     # Train models with trajectory sampling
-                    if not self.args.sample_from_trajectory:
+                    if self.args.sample_from_trajectory:
                         self._train_and_fill_buffers(victim, kettle, poison_delta, self.args.retrain_max_epoch)
                     else:
                         victim._iterate(kettle, poison_delta=poison_delta, max_epoch=self.args.retrain_max_epoch)

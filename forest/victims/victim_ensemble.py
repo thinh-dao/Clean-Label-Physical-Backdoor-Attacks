@@ -299,16 +299,23 @@ class _VictimEnsemble(_VictimBase):
         """Compute the gradient of criterion(model) w.r.t to given data."""
         grad_list, norm_list = [], []
         for model in self.models:
-            with GPUContext(self.setup, model) as model:
-
+            # Check if model is already on GPU or is DataParallel to avoid GPUContext
+            model_device = next(model.parameters()).device
+            is_on_gpu = model_device.type == 'cuda'
+            is_dataparallel = isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel))
+            
+            if is_on_gpu or is_dataparallel:
+                # Model is already on GPU, use it directly
+                working_model = model
+                
                 if criterion is None:
                     criterion = self.loss_fn
-                differentiable_params = [p for p in model.parameters() if p.requires_grad]
+                differentiable_params = [p for p in working_model.parameters() if p.requires_grad]
 
                 if selection == 'max_gradient':
                     grad_norms = []
                     for image, label in zip(images, labels):
-                        loss = criterion(model(image.unsqueeze(0)), label.unsqueeze(0))
+                        loss = criterion(working_model(image.unsqueeze(0)), label.unsqueeze(0))
                         gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
                         grad_norm = 0
                         for grad in gradients:
@@ -332,7 +339,7 @@ class _VictimEnsemble(_VictimBase):
                             warnings.warn(f'Batch size changed to {batch_size} to fit source train size')
                     gradients = None
                     for i in range(images.shape[0]//batch_size):
-                        loss = batch_size * criterion(model(images[i*batch_size:(i+1)*batch_size]), labels[i*batch_size:(i+1)*batch_size])
+                        loss = batch_size * criterion(working_model(images[i*batch_size:(i+1)*batch_size]), labels[i*batch_size:(i+1)*batch_size])
                         if i == 0:
                             gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
                         else:
@@ -340,18 +347,70 @@ class _VictimEnsemble(_VictimBase):
 
                     gradients = tuple(map(lambda i: i / images.shape[0], gradients))
                 else:
-                    loss = criterion(model(images), labels)
+                    loss = criterion(working_model(images), labels)
                     gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
-
 
                 grad_norm = 0
                 for grad in gradients:
                     grad_norm += grad.detach().pow(2).sum()
                 grad_norm = grad_norm.sqrt()            
 
-
                 grad_list.append(gradients)
                 norm_list.append(grad_norm.item())
+                
+            else:
+                # Model is on CPU, use GPUContext
+                with GPUContext(self.setup, model) as working_model:
+
+                    if criterion is None:
+                        criterion = self.loss_fn
+                    differentiable_params = [p for p in working_model.parameters() if p.requires_grad]
+
+                    if selection == 'max_gradient':
+                        grad_norms = []
+                        for image, label in zip(images, labels):
+                            loss = criterion(working_model(image.unsqueeze(0)), label.unsqueeze(0))
+                            gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
+                            grad_norm = 0
+                            for grad in gradients:
+                                grad_norm += grad.detach().pow(2).sum()
+                            grad_norms.append(grad_norm.sqrt())
+                        
+                        source_poison_selected = math.ceil(self.args.sources_selection_rate * images.shape[0])
+                        indices = [i[0] for i in sorted(enumerate(grad_norms), key=lambda x:x[1])][-source_poison_selected:]
+                        images = images[indices]
+                        labels = labels[indices]
+                        write('{} sources with maximum gradients selected'.format(source_poison_selected), self.args.output)
+                    
+                    # Using batch processing for gradients
+                    if self.args.source_gradient_batch is not None:
+                        batch_size = self.args.source_gradient_batch
+                        if images.shape[0] < batch_size:
+                            batch_size = images.shape[0]
+                        else:
+                            if images.shape[0] % batch_size != 0:
+                                batch_size = images.shape[0] // ceil(images.shape[0] / batch_size)
+                                warnings.warn(f'Batch size changed to {batch_size} to fit source train size')
+                        gradients = None
+                        for i in range(images.shape[0]//batch_size):
+                            loss = batch_size * criterion(working_model(images[i*batch_size:(i+1)*batch_size]), labels[i*batch_size:(i+1)*batch_size])
+                            if i == 0:
+                                gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
+                            else:
+                                gradients = tuple(map(lambda i, j: i + j, gradients, torch.autograd.grad(loss, differentiable_params, only_inputs=True)))
+
+                        gradients = tuple(map(lambda i: i / images.shape[0], gradients))
+                    else:
+                        loss = criterion(working_model(images), labels)
+                        gradients = torch.autograd.grad(loss, differentiable_params, only_inputs=True)
+
+                    grad_norm = 0
+                    for grad in gradients:
+                        grad_norm += grad.detach().pow(2).sum()
+                    grad_norm = grad_norm.sqrt()            
+
+                    grad_list.append(gradients)
+                    norm_list.append(grad_norm.item())
 
         return grad_list, norm_list
 
@@ -397,15 +456,26 @@ class _VictimEnsemble(_VictimBase):
         """
         if self.args.sample_gradient:
             idx = random.randint(0, self.args.ensemble - 1)
-            with GPUContext(self.setup, self.models[idx]) as model:
+            model = self.models[idx]
+            # Avoid GPUContext if model is already DataParallel
+            if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
                 single_arg = [arg[idx] if hasattr(arg, '__iter__') and len(arg) == self.args.ensemble else arg for arg in args]
                 return function(model, self.optimizers[idx], *single_arg)
+            else:
+                with GPUContext(self.setup, model) as model:
+                    single_arg = [arg[idx] if hasattr(arg, '__iter__') and len(arg) == self.args.ensemble else arg for arg in args]
+                    return function(model, self.optimizers[idx], *single_arg)
         else:
             outputs = []
             for idx, (model, optimizer) in enumerate(zip(self.models, self.optimizers)):
-                with GPUContext(self.setup, model) as model:
+                # Avoid GPUContext if model is already DataParallel
+                if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
                     single_arg = [arg[idx] if hasattr(arg, '__iter__') and len(arg) == self.args.ensemble else arg for arg in args]
                     outputs.append(function(model, optimizer, *single_arg))
+                else:
+                    with GPUContext(self.setup, model) as model:
+                        single_arg = [arg[idx] if hasattr(arg, '__iter__') and len(arg) == self.args.ensemble else arg for arg in args]
+                        outputs.append(function(model, optimizer, *single_arg))
             # collate
             avg_output = [np.mean([output[idx] for output in outputs]) for idx, _ in enumerate(outputs[0])]
             return avg_output

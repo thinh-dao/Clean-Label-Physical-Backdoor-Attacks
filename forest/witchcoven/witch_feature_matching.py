@@ -34,10 +34,6 @@ class Witch_FM(_Witch):
                 write(f"Training model {idx+1}/{self.args.ensemble}...", self.args.output)
                 model, _, _, _ = single_model
                 
-                # Handle DataParallel models
-                state_dict = model.module.state_dict() if isinstance(model, (nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else model.state_dict()
-                self.buffers[idx].append({k: v.detach().clone().cpu() for k, v in state_dict.items()})
-                
                 # Move to GPUs
                 model.to(**self.setup)
                 if torch.cuda.device_count() > 1:
@@ -75,10 +71,6 @@ class Witch_FM(_Witch):
                 model.to(device=torch.device('cpu'))
         else:
             single_model_setup = victim.model, victim.defs, victim.optimizer, victim.scheduler
-            
-            # Handle DataParallel models
-            state_dict = victim.model.module.state_dict() if isinstance(victim.model, (nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else victim.model.state_dict()
-            self.buffers.append({k: v.detach().clone().cpu() for k, v in state_dict.items()})
             
             current_epoch = victim.epoch + 1
             for victim.epoch in range(current_epoch, current_epoch + max_epochs):
@@ -279,11 +271,12 @@ class Witch_FM(_Witch):
                         print('Model reinitialized to random seed.')
                     elif self.args.retrain_scenario == 'finetuning':
                         # Load victim models to the latest checkpoint
-                        if self.args.ensemble == 1:
-                            victim.model.load_state_dict(self.buffers[-1], strict=True)
-                        else:
-                            for idx in range(self.args.ensemble):
-                                victim.models[idx].load_state_dict(self.buffers[idx][-1], strict=True)
+                        if self.args.sample_from_trajectory:
+                            if self.args.ensemble == 1:
+                                victim.model.load_state_dict(self.buffers[-1], strict=True)
+                            else:
+                                for idx in range(self.args.ensemble):
+                                    victim.models[idx].load_state_dict(self.buffers[idx][-1], strict=True)
                         
                         victim.reinitialize_last_layer(seed=seed, reduce_lr_factor=FINETUNING_LR_DROP, keep_last_layer=True)
                         print('Completely warmstart finetuning!')

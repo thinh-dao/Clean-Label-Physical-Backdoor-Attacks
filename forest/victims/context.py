@@ -9,8 +9,10 @@ class GPUContext():
         self.setup = setup
         self.model = model.to(**self.setup)
         if torch.device != 'cpu' and torch.cuda.device_count() > 1:
-            self.model = torch.nn.DataParallel(self.model)
-            self.model.frozen = self.model.module.frozen
+            # Only wrap with DataParallel if not already wrapped
+            if not isinstance(self.model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+                self.model = torch.nn.DataParallel(self.model)
+                self.model.frozen = self.model.module.frozen
 
     def __enter__(self):
         """Enter."""

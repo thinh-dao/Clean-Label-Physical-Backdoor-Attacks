@@ -97,19 +97,20 @@ class _Witch():
 
             optimizer.zero_grad()
 
+            # Transfer to GPU
+            inputs = inputs.to(**kettle.setup)
+            labels = labels.to(dtype=torch.long, device=kettle.setup['device'], non_blocking=NON_BLOCKING)
+            
+            # Add data augmentation if configured
+            if defs.augmentations:
+                inputs = kettle.augment(inputs)
+
+            # Normalize inputs if required
+            if NORMALIZE:
+                inputs = normalization(inputs)
+                
             # Process inputs
             with torch.autocast(device_type="cuda", dtype=torch.float16):
-                # Transfer to GPU
-                inputs = inputs.to(**kettle.setup)
-                labels = labels.to(dtype=torch.long, device=kettle.setup['device'], non_blocking=NON_BLOCKING)
-                
-                # Add data augmentation if configured
-                if defs.augmentations:
-                    inputs = kettle.augment(inputs)
-
-                # Normalize inputs if required
-                if NORMALIZE:
-                    inputs = normalization(inputs)
                 
                 # Forward pass
                 outputs = model(inputs)
