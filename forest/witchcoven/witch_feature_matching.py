@@ -153,7 +153,7 @@ class Witch_FM(_Witch):
         else:
             poison_bounds = None
 
-        if self.args.sample_from_trajectory or self.args.ensemble > 1: # Train so that the model weights of ensemble are different                
+        if self.args.sample_from_trajectory:             
             if not self.args.skip_clean_training:
                 victim.initialize()
                 print("Training model from scratch for trajectory sampling.")

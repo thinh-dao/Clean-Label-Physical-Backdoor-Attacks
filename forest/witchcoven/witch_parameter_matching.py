@@ -341,7 +341,12 @@ class WitchMTTP(_Witch):
         # Initialize pairs of starting and target parameters
         self.backdoor_trainloader, self.backdoor_testloader, self.backdoor_indices = self._get_backdoor_data(data=kettle, backdoor_training_mode=self.args.bkd_training_mode)
         
-        if self.args.sample_from_trajectory:
+        if self.args.sample_from_trajectory:             
+            if not self.args.skip_clean_training:
+                victim.initialize()
+                print("Training model from scratch for trajectory sampling.")
+                write("Training model from scratch for trajectory sampling.", self.args.output)
+                
             self._initialize_buffers(victim, kettle)
             self._train_and_fill_buffers(victim, kettle, poison_delta=poison_delta, max_epochs=self.args.retrain_max_epoch)
         else:
