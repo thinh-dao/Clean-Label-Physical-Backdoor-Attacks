@@ -74,6 +74,9 @@ def get_model(model_name, num_classes=10, pretrained=True):
     elif model_name.lower() == 'deit' or model_name.lower() == 'deit_tiny':
         model = timm.create_model('deit_tiny_patch16_224', pretrained=pretrained)
         model.head = nn.Linear(model.head.in_features, num_classes)  # Replace classifier head
+    elif model_name.lower() == 'deit_small':
+        model = timm.create_model('deit_small_patch16_224', pretrained=pretrained)
+        model.head = nn.Linear(model.head.in_features, num_classes)  # Replace classifier head
     elif model_name.lower() == 'swin_transformer' or model_name.lower() == 'swin_tiny':
         model = timm.create_model('swin_tiny_patch4_window7_224', pretrained=pretrained, num_classes=num_classes)
     else:
