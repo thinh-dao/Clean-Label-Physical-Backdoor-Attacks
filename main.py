@@ -108,22 +108,22 @@ if __name__ == "__main__":
         
         # Remove duplicates from vnet list
         unique_vnets = []
-        trained_models = []
-        for net, trained_model in zip(args.vnet, model.clean_models):
+        for net in zip(args.vnet):
             if net not in unique_vnets:
                 unique_vnets.append(net)
-                trained_models.append(trained_model)
                 
         args.vnet = unique_vnets  
         
         # Validate on each network in args.vnet
         for idx, m in enumerate(args.vnet):
             args.ensemble = 1
-            args.net = [m]
+            args.net = list(m) if isinstance(m, tuple) else [m]  # Ensure net is a list
             # Hard-coded optimization for now
-            args.optimization = 'transformer-adamw' if any(tm in m for tm in ['deit', 'vit', 'swin']) else 'conservaive-sgd'
+            args.optimization = 'transformer-adamw' if any(tm in m for tm in ['deit', 'vit', 'swin']) else 'conservative-sgd'
             model = forest.Victim(args, num_classes=num_classes, setup=setup) # this instantiates a new model with a different architecture
-            model.original_model = trained_models[idx]  # Load the original model state
+            if args.scenario == "transfer":
+                model.load_trained_model(data.kettle)  # Load the trained model
+                model.save_feature_representation()
             model.validate(data, poison_delta, val_max_epoch=args.val_max_epoch)
         args.net = train_net
     else:  # Validate the main model

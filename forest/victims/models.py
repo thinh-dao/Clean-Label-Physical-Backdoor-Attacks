@@ -8,7 +8,7 @@ import timm
 
 from einops import rearrange, repeat
 from torch.nn import functional as F
-from torchvision.models import resnet50, resnet18, resnet34, vgg11, vgg13, mobilenet_v2, mobilenet_v3_small, ResNet50_Weights, ResNet18_Weights, ResNet34_Weights, VGG11_Weights, VGG13_Weights, MobileNet_V2_Weights, MobileNet_V3_Small_Weights
+from torchvision.models import resnet50, resnet18, resnet34, vgg11, vgg13, mobilenet_v2, mobilenet_v3_small, densenet121, efficientnet_v2_s, ResNet50_Weights, ResNet18_Weights, ResNet34_Weights, VGG11_Weights, VGG13_Weights, MobileNet_V2_Weights, MobileNet_V3_Small_Weights, DenseNet121_Weights, EfficientNet_V2_S_Weights
 from torchvision.models.resnet import BasicBlock, Bottleneck
 
 import pickle
@@ -82,6 +82,14 @@ def get_model(model_name, num_classes=10, pretrained=True):
         model.head = nn.Linear(model.head.in_features, num_classes)  # Replace classifier head
     elif model_name.lower() == 'swin_transformer' or model_name.lower() == 'swin_tiny':
         model = timm.create_model('swin_tiny_patch4_window7_224', pretrained=pretrained, num_classes=num_classes)
+    elif model_name.lower() == 'efficientnetv2_s':
+        model = efficientnet_v2_s(weights=EfficientNet_V2_S_Weights.IMAGENET1K_V1 if pretrained else None)
+        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
+    elif model_name.lower() == 'shufflenet_v2':
+        model = timm.create_model('shufflenet_v2_x1_0', pretrained=pretrained, num_classes=num_classes)
+    elif model_name.lower() == 'densenet121' or model_name.lower() == 'densenet121_imagenet':
+        model = densenet121(weights=DenseNet121_Weights.IMAGENET1K_V1 if pretrained else None)
+        model.classifier = nn.Linear(model.classifier.in_features, num_classes)
     else:
         raise NotImplementedError(f'Model {model_name} not implemented')
 
