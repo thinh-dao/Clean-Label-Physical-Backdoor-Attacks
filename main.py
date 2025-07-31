@@ -120,6 +120,8 @@ if __name__ == "__main__":
         for idx, m in enumerate(args.vnet):
             args.ensemble = 1
             args.net = [m]
+            # Hard-coded optimization for now
+            args.optimization = 'transformer-adamw' if any(tm in m for tm in ['deit', 'vit', 'swin']) else 'conservaive-sgd'
             model = forest.Victim(args, num_classes=num_classes, setup=setup) # this instantiates a new model with a different architecture
             model.original_model = trained_models[idx]  # Load the original model state
             model.validate(data, poison_delta, val_max_epoch=args.val_max_epoch)

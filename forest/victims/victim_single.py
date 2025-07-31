@@ -264,6 +264,7 @@ class _VictimSingle(_VictimBase):
 
     def load_trained_model(self, kettle):
         load_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[0].upper()}_{self.args.dataset.upper()}_{self.args.optimization}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
+        print("Loading model from path: ", load_path)
         if os.path.exists(load_path):
             write(f'Model {self.args.net[0]} already exists, skipping training.', self.args.output)
             if isinstance(self.model, torch.nn.DataParallel):

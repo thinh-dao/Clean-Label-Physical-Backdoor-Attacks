@@ -8,7 +8,7 @@ import timm
 
 from einops import rearrange, repeat
 from torch.nn import functional as F
-from torchvision.models import resnet50, resnet18, resnet34, vgg11, mobilenet_v2, mobilenet_v3_small, ResNet50_Weights, ResNet18_Weights, ResNet34_Weights, VGG11_Weights, MobileNet_V2_Weights, MobileNet_V3_Small_Weights
+from torchvision.models import resnet50, resnet18, resnet34, vgg11, vgg13, mobilenet_v2, mobilenet_v3_small, ResNet50_Weights, ResNet18_Weights, ResNet34_Weights, VGG11_Weights, VGG13_Weights, MobileNet_V2_Weights, MobileNet_V3_Small_Weights
 from torchvision.models.resnet import BasicBlock, Bottleneck
 
 import pickle
@@ -35,6 +35,9 @@ def get_model(model_name, num_classes=10, pretrained=True):
         model.fc = nn.Linear(in_features=num_ftrs, out_features=num_classes) 
     elif model_name.lower() == 'vgg11_imagenet':
         model = vgg11(weights=VGG11_Weights.IMAGENET1K_V1)
+        model.classifier[-1] = nn.Linear(in_features=4096, out_features=num_classes)
+    elif model_name.lower() == 'vgg13_imagenet':
+        model = vgg13(weights=VGG13_Weights.IMAGENET1K_V1)
         model.classifier[-1] = nn.Linear(in_features=4096, out_features=num_classes)
     elif model_name.lower() == 'vgg16':  
         if pretrained:
