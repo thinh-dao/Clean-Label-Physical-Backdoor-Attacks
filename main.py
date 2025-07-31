@@ -117,9 +117,7 @@ if __name__ == "__main__":
         # Validate on each network in args.vnet
         for idx, m in enumerate(args.vnet):
             args.ensemble = 1
-            args.net = list(m) if isinstance(m, tuple) else [m]  # Ensure net is a list
-            # Hard-coded optimization for now
-            args.optimization = 'transformer-adamw' if any(tm in m for tm in ['deit', 'vit', 'swin']) else 'conservative-sgd'
+            args.net = list(m) if isinstance(m, list) else [m]  # Ensure net is a list
             model = forest.Victim(args, num_classes=num_classes, setup=setup) # this instantiates a new model with a different architecture
             if args.scenario == "transfer":
                 model.load_trained_model(data.kettle)  # Load the trained model

@@ -416,7 +416,11 @@ class _VictimEnsemble(_VictimBase):
 
     def load_trained_model(self, kettle):
         for idx, model in enumerate(self.models):
-            load_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[idx].upper()}_{self.args.dataset.upper()}_{self.args.optimization}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
+            if not any(tm in self.args.net[idx] for tm in ['deit', 'vit', 'swin']):
+                # Load model from path
+                load_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[idx].upper()}_{self.args.dataset.upper()}_{self.args.optimization}_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
+            else:
+                load_path = os.path.join(self.args.model_savepath, "clean", f"{self.args.net[idx].upper()}_{self.args.dataset.upper()}_transformer-adamw_{self.model_init_seed}_{self.args.train_max_epoch}.pth")
             print(f"Loading model {idx} from path: ", load_path)
             if os.path.exists(load_path):
                 write(f'Model {self.args.net[idx]} already exists, skipping training.', self.args.output)
