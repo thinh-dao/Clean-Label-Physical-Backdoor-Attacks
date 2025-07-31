@@ -69,7 +69,7 @@ if __name__ == "__main__":
     # Print data status
     data.print_status()
         
-    if args.recipe != 'naive' and args.recipe != 'dirty-label':
+    if args.recipe != 'naive' and 'dirty-label' not in args.recipe:
         poison_delta = witch.brew(model, data)
     else:
         poison_delta = None
@@ -80,7 +80,7 @@ if __name__ == "__main__":
     if args.retrain_from_init:
         model.retrain(data, poison_delta) # Evaluate poison performance on the retrained model
     
-    if args.recipe != "naive" and args.recipe != "dirty-label":
+    if args.recipe != "naive" and 'dirty-label' not in args.recipe:
         clean_images = []   
         poisoned_images = []
 
@@ -95,7 +95,7 @@ if __name__ == "__main__":
         write(f'Average PSNR: {calculate_average_psnr(clean_images, poisoned_images)}', args.output)
 
     # Export
-    if args.save_poison is not None and args.recipe != 'naive' and args.recipe != 'dirty-label':
+    if args.save_poison is not None and args.recipe != 'naive' and 'dirty-label' not in args.recipe:
         data.export_poison(poison_delta, model, path=args.poison_path, mode=args.save_poison)
         
     write('Validating poisoned model...', args.output)

@@ -16,9 +16,9 @@ def options():
     # Central:
     parser.add_argument('--net', default='ResNet50', type=lambda s: [str(item) for item in s.split(',')])
     parser.add_argument('--dataset', default='Facial_recognition_extended', type=str)
-    parser.add_argument('--recipe', default='gradient-matching', type=str, choices=['gradient-matching', 'gradient-matching-private', 'mttp',
+    parser.add_argument('--recipe', default='gradient-matching', type=str, choices=['gradient-matching', 'gradient-matching-private', 'gradient-matching-hidden', 'mttp',
                                                                                     'hidden-trigger', 'hidden-trigger-mt', 'gradient-matching-mt', 'feature-matching',
-                                                                                    'patch', 'gradient-matching-hidden', 'meta', 'meta-v2', 'meta-v3', 'meta-first-order', 'naive', 'dirty-label', 'label-consistent'])
+                                                                                    'patch', 'meta', 'meta-v2', 'meta-v3', 'meta-first-order', 'naive', 'dirty-label-physical', 'dirty-label-digital', 'label-consistent'])
                                                                                     
     parser.add_argument('--threatmodel', default='clean-single-source', type=str, choices=['clean-single-source', 'clean-multi-source', 'clean-all-source', 'third-party', 'self-betrayal', 'all-to-all'])
     parser.add_argument('--num_source_classes', default=1, type=int, help='Number of source classes (for many-to-one attacks)')

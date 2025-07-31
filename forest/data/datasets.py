@@ -544,9 +544,10 @@ class TriggerSet(ImageDataset):
         return classes, class_to_idx
 
 class PatchDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, digital_trigger, poison_indices, normalize=False):            
+    def __init__(self, dataset, digital_trigger, poison_indices, poison_target_transform=None, normalize=False):            
         self.dataset = dataset
         self.normalize = normalize
+        self.poison_target_transform = poison_target_transform
         path = os.path.join('digital_triggers', f"{digital_trigger}.png")
         img  = Image.open(path).convert("RGBA")
 
@@ -582,6 +583,7 @@ class PatchDataset(torch.utils.data.Dataset):
         """
         sample, target, _ = self.dataset[index]
         if index in self.poison_indices:
+            # Add digital trigger to the sample
             sample, target, _ = self.dataset[index]
             _, H, W    = sample.shape
             _, th, tw  = self.trig_rgb.shape
@@ -600,6 +602,10 @@ class PatchDataset(torch.utils.data.Dataset):
             alpha   = self.trig_alpha        # [1, th, tw]
             blended = alpha * self.trig_rgb + (1 - alpha) * region
             sample[:, y0:y0+th, x0:x0+tw] = blended
+            
+            # Maybe transform target
+            if self.poison_target_transform is not None:
+                target = self.poison_target_transform(target)
         
         if self.normalize:
             sample = normalization(sample)

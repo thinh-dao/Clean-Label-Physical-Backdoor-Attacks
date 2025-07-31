@@ -35,7 +35,7 @@ def Witch(args, setup=dict(device=torch.device('cpu'), dtype=torch.float)):
         return WitchLabelConsistent(args, setup)
     elif args.recipe == 'mttp':
         return WitchMTTP(args, setup)
-    elif args.recipe == 'naive' or args.recipe == 'dirty-label':
+    elif args.recipe == 'naive' or 'dirty-label' in args.recipe:
         return None
     else:
         raise NotImplementedError()

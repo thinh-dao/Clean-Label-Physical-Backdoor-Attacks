@@ -466,7 +466,7 @@ class KettleSingle():
                 self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True,
                     drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
             
-        elif self.args.recipe == 'dirty-label':
+        elif self.args.recipe == 'dirty-label-physical':
             if self.args.threatmodel == 'all-to-all':
                 raise NotImplementedError('All-to-all threat model is not implemented for Dirty label attack yet!')
             
@@ -479,7 +479,7 @@ class KettleSingle():
             if self.poison_num > len(self.triggerset_dist[source_class]):
                 self.poison_num = len(self.triggerset_dist[source_class])
             
-            write("Add {} images of source class with physical trigger to training set of target class (dirty-label).".format(self.poison_num), self.args.output)
+            write("Add {} images of source class with physical trigger to training set of target class (dirty-label-physical).".format(self.poison_num), self.args.output)
             
             # Verify classes exist in dataset
             if not hasattr(self.triggerset_dist, 'keys') or source_class not in self.triggerset_dist:
@@ -514,6 +514,35 @@ class KettleSingle():
                 self.source_testloader[source_class] = torch.utils.data.DataLoader(self.source_testset[source_class], batch_size=self.batch_size,
                                                     shuffle=True, drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
                 
+        elif self.args.recipe == 'dirty-label-digital':
+            if self.args.threatmodel == 'all-to-all':
+                raise NotImplementedError('All-to-all threat model is not implemented for Naive attack yet!')
+            
+            target_class = self.poison_setup['target_class']
+            source_class = self.poison_setup['source_class']
+            if isinstance(source_class, list) and len(source_class) > 0:
+                source_class = source_class[0]
+                
+            self.poison_num = ceil(self.args.alpha * len(self.trainset_dist[target_class]))  
+            if self.poison_num > len(self.triggerset_dist[source_class]):
+                self.poison_num = len(self.triggerset_dist[source_class])
+            
+            write("Add {} images of source class with digital trigger to training set of target class (dirty-label-digital).".format(self.poison_num), self.args.output)
+            
+            # Create poisoned dataset with label transform
+            label_poison_transform = LabelPoisonTransform(mapping={source_class: target_class})
+            poison_indices = random.sample(self.trainset_dist[source_class], self.poison_num)
+            self.trainset = PatchDataset(
+                dataset=self.trainset,
+                digital_trigger=self.args.trigger,
+                poison_indices=poison_indices,
+                poison_target_transform= label_poison_transform,
+                normalize=NORMALIZE
+            )
+            self.trainloader = torch.utils.data.DataLoader(self.trainset, batch_size=self.batch_size, shuffle=True,
+                drop_last=False, num_workers=self.num_workers, pin_memory=PIN_MEMORY)
+            self.poison_target_ids = poison_indices
+            
         else:
             if self.args.alpha > 0.0:
                 poison_class = self.poison_setup['poison_class']
