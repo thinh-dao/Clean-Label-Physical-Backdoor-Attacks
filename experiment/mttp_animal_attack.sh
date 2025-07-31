@@ -44,3 +44,9 @@ python main.py --devices=0,3 --recipe=mttp --attackiter=500 --skip_clean_trainin
 
 python main.py --devices=0,1 --recipe=mttp --attackiter=300 --mtt_validate_every=50 --scenario=finetuning --net=resnet18_imagenet --source_criterion=cw --bkd_iter=3 --bkd_lr=0.001 --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --model_seed=123456 --poison_seed=123456 --exp_name=final_mttp_validate
 python main.py --devices=0,1 --recipe=mttp --attackiter=300 --mtt_validate_every=50 --scenario=finetuning --net=resnet18_imagenet --sample_from_trajectory --retrain_max_epoch=30 --source_criterion=cw --bkd_iter=3 --bkd_lr=0.001 --dataset=Animal_classification --poisonkey=11-28 --trigger=phone --model_seed=123456 --poison_seed=123456 --exp_name=final_mttp_validate_traj
+
+
+
+###### Ablation Experiments ######
+python main.py --devices=6,7 --recipe=mttp --bkd_training_mode=poison_only --bkd_lr=0.001 --bkd_epochs=1 --attackiter=750 --scenario=transfer --net=resnet50,resnet50,resnet50,resnet50,resnet50 --ensemble=5 --sample_gradient --dataset=Facial_recognition --poisonkey=9-5 --trigger=sunglasses --model_seed=123456 --poison_seed=123456 --tau=0.1 --eps=16 --alpha=0.1 --exp_name=mttp_transfer_poisononly
+python main.py --devices=7,6 --recipe=mttp --bkd_training_mode=poison_only --bkd_lr=0.001 --bkd_epochs=1 --attackiter=750 --scenario=transfer --net=resnet50,resnet50,resnet50,resnet50,resnet50 --ensemble=5 --sample_gradient --dataset=Facial_recognition --poisonkey=6-1 --trigger=real_beard --model_seed=123456 --poison_seed=123456 --tau=0.1 --eps=16 --alpha=0.1 --exp_name=mttp_transfer_poisononly

@@ -146,8 +146,11 @@ class WitchMTTP(_Witch):
         original_params = parameters_to_vector(
             p for p in model.parameters() if p.requires_grad
         ).detach().clone()
-
+        
         net = copy.deepcopy(model).to(self.setup['device'])
+        if not isinstance(net, torch.nn.DataParallel):
+            net = torch.nn.DataParallel(net)
+        
         opt = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9,
                               weight_decay=5e-4, nesterov=True)
         scaler = torch.amp.GradScaler('cuda')
@@ -547,7 +550,7 @@ class WitchMTTP(_Witch):
 
     def _define_objective(self, inputs, labels, criterion, perturbations, victim, kettle, validate=False):
         def closure(model, optimizer, starting_params, target_params):
-            inner_lr = self.args.bkd_lr
+            inner_lr = optimizer.param_groups[0]['lr']
             
             # 0) move vectors to GPU / device
             new_starting_params = starting_params.detach().clone().to(self.setup["device"])

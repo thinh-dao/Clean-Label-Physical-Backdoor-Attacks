@@ -89,13 +89,14 @@ class _VictimSingle(_VictimBase):
         print(repr(self.defs))
 
     def save_feature_representation(self):
-        self.orginal_model = copy.deepcopy(self.model)
+        self.original_model = copy.deepcopy(self.model)
 
     def load_feature_representation(self):
-        if isinstance(self.model, torch.nn.DataParallel) or isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-            self.model.module.load_state_dict(self.orginal_model.module.state_dict())
-        else:
-            self.model.load_state_dict(self.orginal_model.state_dict())
+        # Get the actual model (unwrap DataParallel if needed)
+        current_model = self.model.module if isinstance(self.model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else self.model
+        original_model = self.original_model.module if isinstance(self.original_model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else self.original_model
+        
+        current_model.load_state_dict(original_model.state_dict())
 
     def freeze_feature_extractor(self):
         """Freezes all parameters except the classifier head."""

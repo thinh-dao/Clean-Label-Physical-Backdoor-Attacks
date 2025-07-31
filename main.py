@@ -108,16 +108,20 @@ if __name__ == "__main__":
         
         # Remove duplicates from vnet list
         unique_vnets = []
-        for net in args.vnet:
+        trained_models = []
+        for net, trained_model in zip(args.vnet, model.clean_models):
             if net not in unique_vnets:
                 unique_vnets.append(net)
+                trained_models.append(trained_model)
+                
         args.vnet = unique_vnets  
         
         # Validate on each network in args.vnet
-        for m in args.vnet:
+        for idx, m in enumerate(args.vnet):
             args.ensemble = 1
             args.net = [m]
             model = forest.Victim(args, num_classes=num_classes, setup=setup) # this instantiates a new model with a different architecture
+            model.original_model = trained_models[idx]  # Load the original model state
             model.validate(data, poison_delta, val_max_epoch=args.val_max_epoch)
         args.net = train_net
     else:  # Validate the main model

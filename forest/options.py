@@ -71,7 +71,6 @@ def options():
     parser.add_argument('--restarts', default=1, type=int, help='How often to restart the attack.')
     
     # MTTP params
-    parser.add_argument('--num_experts', default=1, type=int)
     parser.add_argument('--bkd_epochs', default=1, type=int)
     parser.add_argument('--bkd_batch_size', default=128, type=int, help='Batch size for backdoor training')
     parser.add_argument('--bkd_lr', default=0.001, type=float, help='Learning rate for backdoor training')
