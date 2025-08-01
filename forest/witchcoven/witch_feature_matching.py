@@ -177,11 +177,11 @@ class Witch_FM(_Witch):
                     if self.args.ensemble > 1:
                         # Whether to sample the same index from the trajectory
                         if self.args.sample_same_idx:
-                            sample_idx = random.randint(0, len(self.buffers[0]) - 1)
+                            sample_idx = random.randint(0, len(self.buffers[0]) - 1) if len(self.buffers[0]) > 0 else 0
                             
                         for idx in range(self.args.ensemble):
                             if not self.args.sample_same_idx:
-                                sample_idx = random.randint(0, len(self.buffers[0]) - 1)
+                                sample_idx = random.randint(0, len(self.buffers[0]) - 1) if len(self.buffers[0]) > 0 else 0
                                 
                             if isinstance(victim.models[idx], (nn.DataParallel, torch.nn.parallel.DistributedDataParallel)): 
                                 victim.models[idx].module.load_state_dict(self.buffers[idx][sample_idx], strict=True)
@@ -189,7 +189,7 @@ class Witch_FM(_Witch):
                                 victim.models[idx].load_state_dict(self.buffers[idx][sample_idx], strict=True)
 
                     else:
-                        sample_idx = random.randint(0, len(self.buffers) - 1)
+                        sample_idx = random.randint(0, len(self.buffers) - 1) if len(self.buffers) > 0 else 0
                         if isinstance(victim.model, (nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
                             victim.model.module.load_state_dict(self.buffers[sample_idx], strict=True)
                         else:

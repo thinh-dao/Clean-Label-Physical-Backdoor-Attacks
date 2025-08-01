@@ -366,17 +366,17 @@ class WitchMTTP(_Witch):
                     target_params = []
                     
                     if self.args.sample_same_idx:
-                        sample_idx = random.randint(0, len(self.buffers[0]) - 1)
+                        sample_idx = random.randint(0, len(self.buffers[0]) - 1) if len(self.buffers[0]) > 0 else 0
                         
                     for idx in range(self.args.ensemble):
                         if not self.args.sample_same_idx:
-                            sample_idx = random.randint(0, len(self.buffers[0]) - 1)
+                            sample_idx = random.randint(0, len(self.buffers[0]) - 1) if len(self.buffers[0]) > 0 else 0
                         
                         starting_params.append(self.buffers[idx][sample_idx][0])
                         target_params.append(self.buffers[idx][sample_idx][1])
 
                 else:  
-                    sample_idx = random.randint(0, len(self.buffers) - 1)
+                    sample_idx = random.randint(0, len(self.buffers) - 1) if len(self.buffers) > 0 else 0
                     
                     starting_params = self.buffers[sample_idx][0]  
                     target_params = self.buffers[sample_idx][1]   

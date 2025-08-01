@@ -223,18 +223,18 @@ class WitchGradientMatching(_Witch):
                     source_clean_grad = []
                     
                     if self.args.sample_same_idx:
-                        sample_idx = random.randint(0, len(self.buffers[0]) - 1)
+                        sample_idx = random.randint(0, len(self.buffers[0]) - 1) if len(self.buffers[0]) > 0 else 0
                         
                     for idx in range(self.args.ensemble):
                         if not self.args.sample_same_idx:
-                            sample_idx = random.randint(0, len(self.buffers[0]) - 1)
+                            sample_idx = random.randint(0, len(self.buffers[0]) - 1) if len(self.buffers[0]) > 0 else 0
                         
                         source_grad.append(self.buffers[idx][sample_idx][0])
                         source_gnorm.append(self.buffers[idx][sample_idx][1])
                         source_clean_grad.append(self.buffers[idx][sample_idx][2])
 
                 else:  
-                    sample_idx = random.randint(0, len(self.buffers) - 1)
+                    sample_idx = random.randint(0, len(self.buffers) - 1) if len(self.buffers) > 0 else 0
                     
                     source_grad = self.buffers[sample_idx][0]  
                     source_gnorm = self.buffers[sample_idx][1]
