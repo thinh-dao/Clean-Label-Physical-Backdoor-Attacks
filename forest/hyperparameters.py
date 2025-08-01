@@ -4,13 +4,12 @@ from dataclasses import dataclass, asdict
 
 def training_strategy(model_name, args):
     """Parse training strategy."""
-    if any(tm in model_name for tm in ['deit', 'vit', 'swin']) or args.optimization == 'transformer-adamw':
-        # Use transformer-adamw for transformer models
-        defaults = TRANSFORMER_ADAMW
-    elif args.optimization == 'conservative-sgd':
+    if args.optimization == 'conservative-sgd':
         defaults = CONSERVATIVE_SGD
     elif args.optimization == 'conservative-adam':
         defaults = CONSERVATIVE_ADAM
+    elif args.optimization == 'transformer-adamw':
+        defaults = TRANSFORMER_ADAMW
     elif args.optimization == 'private-gaussian':
         defaults = PRIVACY_GAUSSIAN
     elif args.optimization == 'private-laplacian':
