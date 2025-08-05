@@ -14,7 +14,7 @@ import pickle
 
 from ..utils import write, set_random_seed
 
-from .datasets import construct_datasets, Subset, ConcatDataset, ImageDataset, CachedDataset, TriggerSet, PatchDataset, LabelPoisonTransform
+from .datasets import construct_datasets, Subset, ConcatDataset, ImageDataset, CachedDataset, TriggerSet, PatchDataset, LabelPoisonTransform, PoisonSet
 from ..victims.context import GPUContext
 
 from .diff_data_augmentation import RandomTransform, RandomGridShift, RandomTransformFixed, FlipLR, MixedAugment
@@ -179,7 +179,7 @@ class KettleSingle():
             else:
                 raise ValueError(f'Invalid diff. transformation given: {self.augmentations}.')
 
-            if self.mixing_method != None or self.args.pmix:
+            if (self.mixing_method != None and self.mixing_method['type'] != '') or self.args.pmix:
                 if 'mixup' in self.mixing_method['type']:
                     nway = int(self.mixing_method['type'][0]) if 'way' in self.mixing_method['type'] else 2
                     self.mixer = Mixup(nway=nway, alpha=self.mixing_method['strength'])
@@ -274,7 +274,7 @@ class KettleSingle():
             image_PIL = PIL.Image.fromarray(image_torch_uint8.numpy())
             return image_PIL
 
-        def _save_image(input, label, idx, location, train=True):
+        def _save_image(input, label, idx, location, train=True, add_delta=False):
             """Save input image to given location, add poison_delta if necessary."""
             
             if mode == 'poison_only':
@@ -287,10 +287,10 @@ class KettleSingle():
             poison_slice = self.poison_lookup.get(idx)
             if (poison_slice is not None) and train:
                 perturbation = poison_delta[poison_slice, :, :, :]
-                input += perturbation
-
-                if self.args.recipe == 'label-consistent': 
-                    self.face_detector.patch_image(input, poison_slice)                                     
+                
+                if add_delta:
+                    input += perturbation
+                                                   
             _torch_to_PIL(input).save(filename)
             if mode == 'poison_only':
                 if perturbation == None: 
@@ -304,14 +304,17 @@ class KettleSingle():
             data['poison_delta'] = poison_delta
             data['poison_target_ids'] = self.poison_target_ids
             data['source_images'] = [data for data in self.source_testset]
-            name = f'{path}poisons_packed_{datetime.date.today()}.pth'
+            name = f'{path}/poisons_packed_{datetime.date.today()}.pth'
             torch.save([poison_delta, self.poison_target_ids], os.path.join(path, name))
             
         elif mode == 'poison_only':
-            for input, label, idx in self.poisonset:
-                lookup = self.poison_lookup.get(idx)
-                if lookup is not None:
-                    _save_image(input, label, idx, location=os.path.join(path), train=True)
+            if self.args.recipe == "label-consistent":
+                poison_dataset = PoisonSet(dataset=self.poisonset, poison_delta=poison_delta, poison_lookup=self.poison_lookup, normalize=NORMALIZE, digital_trigger=self.args.trigger)
+            else:
+                poison_dataset = PoisonSet(dataset=self.poisonset, poison_delta=poison_delta, poison_lookup=self.poison_lookup, normalize=NORMALIZE)
+            
+            for input, label, idx in poison_dataset:
+                _save_image(input, label, idx, location=os.path.join(path), train=True)
             write('Poisoned training images exported ...', self.args.output)  
             
         elif mode == 'limited':
@@ -393,8 +396,6 @@ class KettleSingle():
             
         else:
             raise NotImplementedError()
-
-        write('Dataset fully exported.', self.args.output)
         
     def setup_poison_indices(self, inspection_path):
         indices_path = os.path.join(inspection_path, 'indices.json')

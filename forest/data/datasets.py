@@ -188,7 +188,7 @@ class PoisonSet(torch.utils.data.Dataset):
         img, target, index = self.dataset[idx]
 
         # Only poison if lookup exists
-        lookup = self.poison_lookup.get(idx)
+        lookup = self.poison_lookup.get(index)
         if lookup is not None:
             # 1) add learned delta
             img = img + self.poison_delta[lookup].detach()
@@ -212,7 +212,7 @@ class PoisonSet(torch.utils.data.Dataset):
                 alpha   = self.trig_alpha        # [1, th, tw]
                 blended = alpha * self.trig_rgb + (1 - alpha) * region
                 img[:, y0:y0+th, x0:x0+tw] = blended
-
+            
         # 3) apply any further transforms
         if self.transform:
             img = self.transform(img)

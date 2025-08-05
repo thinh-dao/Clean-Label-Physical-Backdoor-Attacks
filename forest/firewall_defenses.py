@@ -9,12 +9,16 @@ import math
 import cv2
 import tqdm
 import torchvision.transforms.v2 as transforms
+import time
 
-from torch.utils.data import Subset
+from tqdm import tqdm
 from forest.data.datasets import ImageDataset
 from torch.nn import functional as F
+from torch.utils.data import Subset
 from scipy.fftpack import dct, idct
-from .consts import NON_BLOCKING
+from forest.consts import NON_BLOCKING
+from torch.optim.lr_scheduler import MultiStepLR
+from torch import nn, optim
 
 def get_firewall(firewall_name, model, dataset):
     if firewall_name.lower() == 'strip':
@@ -63,7 +67,7 @@ class Strip():
                 all_entropy.append(e)
         all_entropy = torch.FloatTensor(all_entropy)
         true_positives = (all_entropy < threshold_low).sum().item()
-        true_positive_rate = true_positives / len(kettle.source_testloader[source_class])
+        true_positive_rate = true_positives / len(kettle.source_testloader[source_class].dataset)
 
         # Calculate FPR
         all_entropy = []
@@ -74,7 +78,7 @@ class Strip():
                 all_entropy.append(e)
         all_entropy = torch.FloatTensor(all_entropy)
         false_positives = (all_entropy < threshold_low).sum().item()
-        false_positive_rate = false_positives / len(kettle.validloader)
+        false_positive_rate = false_positives / len(kettle.validloader.dataset)
 
         print(f"True Positive Rate (TPR): {true_positive_rate:.4f}")
         print(f"False Positive Rate (FPR): {false_positive_rate:.4f}")
@@ -343,8 +347,7 @@ class Frequency:
         tensor_list = []
         labels_list = []
         totensor = transforms.Compose([
-            transforms.ToImageTensor(),
-            transforms.ConvertImageDtype(torch.float32),
+            transforms.ToDtype(torch.float32, scale=True),
         ])
         
         for img, _, _ in dataset:
@@ -408,7 +411,7 @@ class Frequency:
 
         test_set = ImageDataset('datasets/Facial_recognition_crop_partial/real_beard/test')
         totensor = transforms.Compose([
-            transforms.ToImageTensor(),
+            transforms.ToImage(), 
             transforms.ConvertImageDtype(torch.float32),
         ])
 
@@ -453,8 +456,8 @@ class Frequency:
         poison_set.dataset.transform  = None
 
         totensor = transforms.Compose([
-            transforms.ToImageTensor(),
-            transforms.ConvertImageDtype(torch.float32),
+            transforms.ToImage(), 
+            transforms.ToDtype(torch.float32, scale=True),
         ])
 
         with torch.no_grad():  # Disable gradient calculation
@@ -722,7 +725,7 @@ class CognitiveDefense:
         print(f"False Positive Rate (FPR): {false_positive_rate:.4f}")
 
         return true_positive_rate, false_positive_rate
-
+    
 class ScaleUp():
     name: str = 'scale up'
 
@@ -732,7 +735,12 @@ class ScaleUp():
         if threshold is None:
             self.threshold = 0.5
 
-        size = defense_ratio * len(self.kettle.validset)
+        self.scale_set = scale_set
+        self.model = model
+        self.kettle = kettle
+        self.with_clean_data = with_clean_data
+
+        size = int(defense_ratio * len(self.kettle.validset))
         random_indices = torch.randperm(len(self.kettle.validset))[:size]
         self.clean_set = Subset(self.kettle.validset, indices=random_indices)
         self.clean_loader = torch.utils.data.DataLoader(self.clean_set, 
@@ -741,13 +749,7 @@ class ScaleUp():
                                                         num_workers=4, 
                                                         pin_memory=True
                                                     )
-        
-        self.scale_set = scale_set
-        self.model = model
-        self.kettle = kettle
 
-
-        self.with_clean_data = with_clean_data
         # test set --- clean
         # std_test - > 10000 full, val -> 2000 (for detection), test -> 8000 (for accuracy)
 
@@ -762,7 +764,7 @@ class ScaleUp():
         clean_pred_correct_mask = []
         pred_poison_mask = []
 
-        for idx, (clean_img, labels) in enumerate(self.kettle.validloader):
+        for idx, (clean_img, labels, _) in enumerate(self.kettle.validloader):
             clean_img = clean_img.cuda()  # batch * channels * hight * width
             labels = labels.cuda()  # batch
 
@@ -773,7 +775,7 @@ class ScaleUp():
             scaled_imgs = []
             scaled_labels = []
             for scale in self.scale_set:
-                scaled_imgs.append(torch.clip(clean_img) * scale, 0.0, 1.0)
+                scaled_imgs.append(torch.clip(clean_img * scale, min=0.0, max=1.0))
             for scale_img in scaled_imgs:
                 scale_label = torch.argmax(self.model(scale_img), dim=1)
                 scaled_labels.append(scale_label)
@@ -793,10 +795,10 @@ class ScaleUp():
         clean_pred_correct_mask = torch.cat(clean_pred_correct_mask, dim=0)
         pred_poison_mask = torch.cat(pred_poison_mask, dim=0)
 
-        print("Clean Accuracy: %d/%d = %.6f" % (clean_pred_correct_mask[torch.logical_not(pred_poison_mask)].sum(), len(self.kettle.validloader),
-                                                clean_pred_correct_mask[torch.logical_not(pred_poison_mask)].sum() / len(self.kettle.validloader)))
+        print("Clean Accuracy: %d/%d = %.6f" % (clean_pred_correct_mask[torch.logical_not(pred_poison_mask)].sum(), len(self.kettle.validloader.dataset),
+                                                clean_pred_correct_mask[torch.logical_not(pred_poison_mask)].sum() / len(self.kettle.validloader.dataset)))
 
-        print(f"False Positive Rate (FPR): {false_positives / len(self.kettle.validloader):.4f}")
+        print(f"False Positive Rate (FPR): {false_positives / len(self.kettle.validloader.dataset):.4f}")
 
         true_positives = 0
         poison_attack_success_mask = []
@@ -804,21 +806,18 @@ class ScaleUp():
         source_class = self.kettle.poison_setup['source_class'][0]
         target_class = self.kettle.poison_setup['target_class']
 
-        for idx, (trigger_img, labels) in enumerate(self.kettle.source_testloader[source_class]):
+        for idx, (trigger_img, labels, _) in enumerate(self.kettle.source_testloader[source_class]):
             trigger_img = trigger_img.cuda()  # batch * channels * hight * width
             labels = labels.cuda()
 
             preds = torch.argmax(self.model(trigger_img), dim=1)
             poison_attack_success_mask.append(torch.eq(preds, target_class))
 
-            if use_pseudo_labels:
-                labels = preds
-
             # evaluate the clean data
             scaled_imgs = []
             scaled_labels = []
             for scale in self.scale_set:
-                scaled_imgs.append(torch.clip(trigger_img) * scale, 0.0, 1.0)
+                scaled_imgs.append(torch.clip(trigger_img * scale, min=0.0, max=1.0))
 
             for scale_img in scaled_imgs:
                 scale_label = torch.argmax(self.model(scale_img), dim=1)
@@ -837,21 +836,27 @@ class ScaleUp():
             true_positives += (spc_poison > self.threshold).sum().item()
         
         poison_attack_success_mask = torch.cat(poison_attack_success_mask, dim=0)
+        pred_poison_mask = torch.cat(pred_poison_mask, dim=0)
 
-        print(f"ASR: %d/%d = %.6f" % (poison_attack_success_mask[torch.logical_not(pred_poison_mask)].sum(), len(self.kettle.source_testloader[source_class]),
-                                    poison_attack_success_mask[torch.logical_not(pred_poison_mask)].sum() / len(self.kettle.source_testloader[source_class])))
-        print(f"True Positive Rate (TPR): {true_positives / len(self.kettle.source_testloader[source_class]):.4f}")
+        print(f"ASR: %d/%d = %.6f" % (poison_attack_success_mask[torch.logical_not(pred_poison_mask)].sum(), len(self.kettle.source_testloader[source_class].dataset),
+                                    poison_attack_success_mask[torch.logical_not(pred_poison_mask)].sum() / len(self.kettle.source_testloader[source_class].dataset)))
+        print(f"True Positive Rate (TPR): {true_positives / len(self.kettle.source_testloader[source_class].dataset):.4f}")
+
+        true_positive_rate = true_positives / len(self.kettle.source_testloader[source_class].dataset)
+        false_positive_rate = false_positives / len(self.kettle.validloader.dataset)
+
+        return true_positive_rate, false_positive_rate
 
 
     def init_spc_norm(self):
         total_spc = []
-        for idx, (clean_img, labels) in enumerate(self.clean_loader):
+        for idx, (clean_img, labels, _) in enumerate(self.clean_loader):
             clean_img = clean_img.cuda()  # batch * channels * hight * width
             labels = labels.cuda()  # batch
             scaled_imgs = []
             scaled_labels = []
             for scale in self.scale_set:
-                scaled_imgs.append(torch.clip(clean_img) * scale, 0.0, 1.0)
+                scaled_imgs.append(torch.clip(clean_img * scale, min=0.0, max=1.0))
             for scale_img in scaled_imgs:
                 scale_label = torch.argmax(self.model(scale_img), dim=1)
                 scaled_labels.append(scale_label)
@@ -866,13 +871,6 @@ class ScaleUp():
         self.mean = torch.mean(total_spc).item()
         self.std = torch.std(total_spc).item()
 
-
-import math
-import time
-from torch.optim.lr_scheduler import MultiStepLR
-from torch import nn, optim
-
-
 class BaDExpert():
     """
     BaDExpert
@@ -882,10 +880,10 @@ class BaDExpert():
         
     This is the official code implementation!
     """
-    def __init__(self, kettle, defense_ratio=0.2, defense_fpr=0.01, hard_filter=False):
+    def __init__(self, model, kettle, defense_ratio=0.2, defense_fpr=0.01, hard_filter=False):
         self.kettle = kettle
 
-        size = defense_ratio * len(self.kettle.validset)
+        size = int(defense_ratio * len(self.kettle.validset))
         random_indices = torch.randperm(len(self.kettle.validset))[:size]
         self.clean_set = Subset(self.kettle.validset, indices=random_indices)
         self.clean_loader = torch.utils.data.DataLoader(self.clean_set, 
@@ -897,43 +895,27 @@ class BaDExpert():
         
         self.defense_fpr = defense_fpr
         self.hard_filter = hard_filter
+        self.model = model
         
-    def detect(self, original_model):
-        '''
-        original_model: the original backdoored model
-        '''
-        
+    def detect(self):
         start_time = time.perf_counter()
         print("\n#####[BAD EXPERT DETECTION]#####")
         
-        unlearned_model = copy.deepcopy(original_model)
-        shadow_model = copy.deepcopy(original_model)
+        unlearned_model = copy.deepcopy(self.model)
+        shadow_model = copy.deepcopy(self.model)
         
-        unlearned_model = self.unlearn(unlearned_model, self.kettle)
-        shadow_model = self.finetune(shadow_model, self.kettle)
-
-        original_model = nn.DataParallel(original_model)
-        shadow_model = nn.DataParallel(shadow_model)
-        unlearned_model = nn.DataParallel(unlearned_model)
-        
-        original_model = original_model.cuda()
-        shadow_model = shadow_model.cuda()
-        unlearned_model = unlearned_model.cuda()
-        
-        original_model.eval()
-        shadow_model.eval()
-        unlearned_model.eval()
+        unlearned_model = self.unlearn(unlearned_model, self.clean_loader)
+        shadow_model = self.finetune(shadow_model, self.clean_loader)
 
         print("[Original]")
-        eval_model(original_model, self.kettle)
+        eval_model(self.model, self.kettle)
         print("[Repaired]")
         eval_model(shadow_model, self.kettle)
         print("[Unlearned]")
         eval_model(unlearned_model, self.kettle)
 
-
-        threshold = self.get_threshold(self.defense_fpr, original_model, shadow_model, unlearned_model, self.kettle.validloader)
-        self.deploy(original_model, shadow_model, unlearned_model, threshold)
+        threshold = self.get_threshold(self.defense_fpr, self.model, shadow_model, unlearned_model, self.kettle.validloader)
+        self.deploy(self.model, shadow_model, unlearned_model, threshold)
         
         end_time = time.perf_counter()
         print("Elapsed time: {:.2f}s".format(end_time - start_time))
@@ -947,7 +929,7 @@ class BaDExpert():
             unlearned_output = []
             shadow_output = []
             original_pred = []
-            for batch_idx, (data, target) in enumerate(tqdm(test_set_loader)):
+            for batch_idx, (data, target, idxs) in enumerate(tqdm(test_set_loader)):
                 # on clean data
                 data, target = data.cuda(), target.cuda()
                 
@@ -995,7 +977,10 @@ class BaDExpert():
         # Construct a predicion dictionary
         true_pred = []
         model.eval()
-        for batch_idx, (data, target) in enumerate(clean_loader):
+
+        batch = next(iter(clean_loader))
+
+        for batch_idx, (data, target, idxs) in enumerate(clean_loader):
             data, target = data.cuda(), target.cuda()
             output = model(data)
             pred = output.argmax(dim=1)
@@ -1008,7 +993,7 @@ class BaDExpert():
             model.train()
             # model.apply(tools.set_bn_eval)
 
-            for batch_idx, (data, target) in enumerate(clean_loader):
+            for batch_idx, (data, target, idxs) in enumerate(clean_loader):
 
                 optimizer.zero_grad()
 
@@ -1046,7 +1031,7 @@ class BaDExpert():
 
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.SGD([p for p in model.parameters() if p.requires_grad],
-                                lr=0.1,
+                                lr=0.01,
                                 momentum=0.9,
                                 weight_decay=1e-4,
                                 nesterov=True)
@@ -1059,7 +1044,7 @@ class BaDExpert():
             model.train()
             # model.apply(tools.set_bn_eval)
 
-            for batch_idx, (data, target) in enumerate(clean_loader):
+            for batch_idx, (data, target, idxs) in enumerate(clean_loader):
 
                 optimizer.zero_grad()
 
@@ -1072,10 +1057,9 @@ class BaDExpert():
                 optimizer.step()
 
             print('\n<Finetuning> Train Epoch: {} \tLoss: {:.6f}, lr: {:.2f}'.format(epoch, loss.item(), optimizer.param_groups[0]['lr']))
-
             scheduler.step()
 
-        eval_model(model, self.kettle)
+        # eval_model(model, self.kettle)
         return model
 
     def deploy(self, original_model, shadow_model, unlearned_model, threshold):
@@ -1090,7 +1074,7 @@ class BaDExpert():
 
         false_positives = 0
         with torch.no_grad():
-            for batch_idx, (data, target) in enumerate(tqdm(self.kettle.validloader)):
+            for batch_idx, (data, target, idxs) in enumerate(tqdm(self.kettle.validloader)):
                 # on clean data
                 data, target = data.cuda(), target.cuda()
                 
@@ -1116,8 +1100,8 @@ class BaDExpert():
         print("Clean Accuracy (not alert): %d/%d = %.6f" % (clean_pred_correct_mask[torch.logical_not(clean_y_pred)].sum(), torch.logical_not(clean_y_pred).sum(),
                                                             clean_pred_correct_mask[torch.logical_not(clean_y_pred)].sum() / torch.logical_not(clean_y_pred).sum() if torch.logical_not(clean_y_pred).sum() > 0 else 0))
 
-        print("False Positives: %d/%d = %.6f" % (false_positives, len(self.kettle.validloader),
-                                                false_positives / len(self.kettle.validloader)))
+        print("False Positives: %d/%d = %.6f" % (false_positives, len(self.kettle.validloader.dataset),
+                                                false_positives / len(self.kettle.validloader.dataset)))
 
         print("\nFor poison inputs:")
         poison_y_pred = []
@@ -1126,8 +1110,10 @@ class BaDExpert():
         true_positives = 0
 
         source_class = self.kettle.poison_setup['source_class'][0]
+        target_class = self.kettle.poison_setup['target_class']
+
         with torch.no_grad():
-            for batch_idx, (data, target) in enumerate(tqdm(self.kettle.source_testloader[source_class])):
+            for batch_idx, (data, target, idxs) in enumerate(tqdm(self.kettle.source_testloader[source_class])):
                 # on poison data
                 data, target = data.cuda(), target.cuda()
                 
@@ -1136,7 +1122,7 @@ class BaDExpert():
                 shadow_output = shadow_model(data)
                 
                 original_pred = original_output.argmax(dim=1)
-                poison_attack_success_mask.append(torch.eq(original_pred, target))
+                poison_attack_success_mask.append(torch.eq(original_pred, target_class))
 
                 alert_mask, alert_score = self.get_alert_mask(original_output, shadow_output, unlearned_output, threshold, return_score=True) # filter!
                 poison_y_pred.append(alert_mask)
@@ -1146,11 +1132,17 @@ class BaDExpert():
         poison_y_pred = torch.cat(poison_y_pred, dim=0)
         poison_y_score = torch.cat(poison_y_score, dim=0)
         poison_attack_success_mask = torch.cat(poison_attack_success_mask, dim=0)
-        print("ASR: %d/%d = %.6f" % (poison_attack_success_mask[torch.logical_not(poison_y_pred)].sum(), len(self.kettle.source_testloader[source_class]),
-                                    poison_attack_success_mask[torch.logical_not(poison_y_pred)].sum() / len(self.kettle.source_testloader[source_class])))
+        print("ASR: %d/%d = %.6f" % (poison_attack_success_mask[torch.logical_not(poison_y_pred)].sum(), len(self.kettle.source_testloader[source_class].dataset),
+                                    poison_attack_success_mask[torch.logical_not(poison_y_pred)].sum() / len(self.kettle.source_testloader[source_class].dataset)))
         
-        print("True Positives: %d/%d = %.6f" % (true_positives, len(self.kettle.source_testloader[source_class]),
-                                                true_positives / len(self.kettle.source_testloader[source_class])))
+        print("True Positives: %d/%d = %.6f" % (true_positives, len(self.kettle.source_testloader[source_class].dataset),
+                                                true_positives / len(self.kettle.source_testloader[source_class].dataset)))
+        
+        false_positive_rate = false_positives / len(self.kettle.validloader)
+        true_positive_rate = true_positives / len(self.kettle.source_testloader[source_class])
+
+        return true_positive_rate, false_positive_rate
+                                        
 
     def get_alert_mask(self, original_output, shadow_output, unlearned_output, threshold, return_score=False):
         softmax = nn.Softmax(dim=1)
@@ -1191,26 +1183,25 @@ class BaDExpert():
 
 def eval_model(model, kettle):
     model.eval()
-
     clean_acc, asr = 0, 0
     corrects = 0
-    for batch_idx, (data, target) in enumerate(tqdm(kettle.validloader)):
-        data, target = data.cuda(), target.cuda()
+    for batch_idx, (data, target, idxs) in enumerate(tqdm(kettle.validloader)):
+        data, target = data.to('cuda:0'), target.to('cuda:0')
         output = model(data)
         pred = output.argmax(dim=1)
         corrects += torch.eq(pred, target).sum().item()
-    clean_acc = corrects / len(kettle.validloader)
+    clean_acc = corrects / len(kettle.validloader.dataset)
 
     source_class = kettle.poison_setup['source_class'][0]
     target_class = kettle.poison_setup['target_class']
 
     corrects = 0
-    for batch_idx, (data, _) in enumerate(tqdm(kettle.source_testloader[source_class])):
-        data = data.cuda()
+    for batch_idx, (data, _, _) in enumerate(tqdm(kettle.source_testloader[source_class])):
+        data = data.to('cuda:0')
         output = model(data)
         pred = output.argmax(dim=1)
         corrects += torch.eq(pred, target_class).sum().item()
-    asr = corrects / len(kettle.source_testloader[source_class])
+    asr = corrects / len(kettle.source_testloader[source_class].dataset)
 
-    print(f"Clean Accuracy: {clean_acc:.4f}, ASR: {asr:.4f}")
+    print(f"Clean Accuracy: {clean_acc*100:.2f}%, ASR: {asr*100:.2f}%")
     return clean_acc, asr

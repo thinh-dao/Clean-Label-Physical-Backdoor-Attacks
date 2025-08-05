@@ -18,6 +18,8 @@ def training_strategy(model_name, args):
         defaults = ADVERSARIAL
     elif args.optimization == 'mixup':
         defaults = MIXUP
+    elif args.optimization == 'cutmix':
+        defaults = CUTMIX
     else:
         raise ValueError(f'Unknown opt. strategy {args.optimization}.')
     defs = Hyperparameters(**defaults.asdict())
@@ -101,7 +103,7 @@ CONSERVATIVE_SGD = Hyperparameters(
     augmentations=True,
     privacy=dict(clip=None, noise=None, distribution=None),
     novel_defense=None,
-    mixing_method=None,
+    mixing_method=dict(type='', strength=0.0, correction=False),
     adaptive_attack=True,
     defend_features_only=False,
 )
@@ -200,6 +202,22 @@ MIXUP = Hyperparameters(
     privacy=None,
     novel_defense=None,
     mixing_method=dict(type='mixup', strength=1.0, correction=True),
+    adaptive_attack=True,
+    defend_features_only=False,
+)
+
+CUTMIX = Hyperparameters(
+    name='mixup',
+    lr=0.1,
+    epochs=40,
+    batch_size=32,
+    optimizer='SGD',
+    scheduler='linear',
+    weight_decay=5e-4,
+    augmentations=True,
+    privacy=None,
+    novel_defense=None,
+    mixing_method=dict(type='cutmix', strength=1.0, correction=True),
     adaptive_attack=True,
     defend_features_only=False,
 )

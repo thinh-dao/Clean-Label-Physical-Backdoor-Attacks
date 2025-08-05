@@ -1,20 +1,13 @@
-"""General interface script to launch poisoning jobs."""
-
-"""General interface script to launch poisoning jobs."""
-
 import torch
 import os
-
 import datetime
 import time
-
+import numpy as np
 import forest
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
 
-from forest.filtering_defenses import get_defense
 from forest.firewall_defenses import get_firewall
-from forest.utils import write, set_random_seed
+from forest.filtering_defenses import get_defense
+from forest.utils import write, set_random_seed, calculate_average_psnr
 from forest.consts import BENCHMARK, SHARING_STRATEGY
 
 torch.backends.cudnn.benchmark = BENCHMARK
@@ -35,12 +28,17 @@ if args.exp_name is None:
     exp_num = len(os.listdir(os.path.join(os.getcwd(), 'outputs'))) + 1
     args.exp_name = f'exp_{exp_num}'
 
-args.output = f'outputs/{args.exp_name}/{args.recipe}/{args.trigger}/{args.net[0].upper()}/{args.poisonkey}_{args.trigger}_{args.alpha}_{args.eps}_{args.attackoptim}_{args.attackiter}.txt'
+# Set up output file
+if args.ensemble > 1:
+    model_name = '_'.join(args.net)
+else:
+    model_name = args.net[0].upper()
+    
+args.output = f'outputs/{args.exp_name}/{args.dataset}/{model_name}_{args.scenario}_{args.recipe}_{args.poisonkey}_{args.trigger}_{args.alpha}_{args.eps}_{args.visreg}_{args.vis_weight}_{args.attackoptim}_{args.attackiter}.txt'
 print("Output is logged in", args.output)
 os.makedirs(os.path.dirname(args.output), exist_ok=True)
 open(args.output, 'w').close() # Clear the output files
 
-torch.cuda.empty_cache()
 if args.deterministic:
     forest.utils.set_deterministic()
 
@@ -48,7 +46,7 @@ if __name__ == "__main__":
     
     setup = forest.utils.system_startup(args) # Set up device and torch data type
     
-    num_classes = len(os.listdir(os.path.join("datasets",args.dataset, 'train')))
+    num_classes = len(os.listdir(os.path.join("datasets", args.dataset, 'train')))
     model = forest.Victim(args, num_classes=num_classes, setup=setup) # Initialize model and loss_fn
     data = forest.Kettle(args, model.defs.batch_size, model.defs.augmentations,
                         model.defs.mixing_method, setup=setup) # Set up trainloader, validloader, poisonloader, poison_ids, trainset/poisonset/source_testset
@@ -62,14 +60,16 @@ if __name__ == "__main__":
         
     train_time = time.time()
     print("Train time: ", str(datetime.timedelta(seconds=train_time - start_time)))
-                
+    
+    if args.clean_training_only:
+        exit(0)
+    
     # Select poisons based on maximum gradient norm
     data.select_poisons(model)
-    
     # Print data status
     data.print_status()
         
-    if args.recipe != 'naive':
+    if args.recipe != 'naive' and 'dirty-label' not in args.recipe:
         poison_delta = witch.brew(model, data)
     else:
         poison_delta = None
@@ -80,8 +80,22 @@ if __name__ == "__main__":
     if args.retrain_from_init:
         model.retrain(data, poison_delta) # Evaluate poison performance on the retrained model
     
+    if args.recipe != "naive" and 'dirty-label' not in args.recipe:
+        clean_images = []   
+        poisoned_images = []
+
+        for input, label, idx in data.poisonset:
+            clean_images.append(input.clone().detach().cpu().numpy())
+            lookup = data.poison_lookup.get(idx)
+            if lookup is not None:
+                perturbation = poison_delta[lookup, :, :, :]
+                input += perturbation
+                poisoned_images.append(input.clone().detach().cpu().numpy())
+
+        write(f'Average PSNR: {calculate_average_psnr(clean_images, poisoned_images)}', args.output)
+
     # Export
-    if args.save_poison is not None and args.recipe != 'naive':
+    if args.save_poison is not None and args.recipe != 'naive' and 'dirty-label' not in args.recipe:
         data.export_poison(poison_delta, model, path=args.poison_path, mode=args.save_poison)
 
     if args.save_backdoored_model:
@@ -95,13 +109,16 @@ if __name__ == "__main__":
     
     if args.defense == None: 
         raise ValueError('Defense is not defined')
-    
+        
     cleansers = args.defense.lower().split(',')
     for cleanser in cleansers:      
         write(f'\nCleanser: {cleanser.upper()}', args.output)
+        filter_idx_dist = [0 for i in range(len(data.trainset.classes))]
         defense = get_defense(cleanser)
         clean_ids = defense(data, model, poison_delta, args)
         poison_ids = set(range(len(data.trainset))) - set(clean_ids)
+        for i in poison_ids:
+            filter_idx_dist[data.trainset.targets[i]] += 1
         removed_images = len(data.trainset) - len(clean_ids)
         removed_poisons = len(set(data.poison_target_ids) & poison_ids)
         removed_cleans = removed_images - removed_poisons
@@ -111,6 +128,7 @@ if __name__ == "__main__":
         # Statistics
         data.reset_trainset(clean_ids)
         write(f'Filtered {removed_images} images out of {len(data.trainset.dataset)}. {removed_poisons} were poisons.', args.output)
+        write(f'Filter index distribution: {filter_idx_dist}', args.output)
         write(f'Elimination Rate: {elimination_rate}% Sacrifice Rate: {sacrifice_rate}%\n', args.output)
         
         # Evaluate poison performance on the retrained model

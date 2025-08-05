@@ -191,7 +191,7 @@ class _VictimEnsemble(_VictimBase):
         else:
             stagger_list = [max_epoch] * self.args.ensemble
 
-        if self.args.denoise:
+        if self.args.denoise and poison_delta is not None:
             denoiser = OpenCVNonLocalMeansDenoiser(h=10, h_color=10)
 
             tensors = []
@@ -205,8 +205,6 @@ class _VictimEnsemble(_VictimBase):
                     tensor += poison_delta[lookup, :, :, :]
 
                 tensor = denoiser(tensor)
-                if NORMALIZE:
-                    tensor = normalization(tensor)
 
                 tensors.append(tensor)
                 labels.append(label)

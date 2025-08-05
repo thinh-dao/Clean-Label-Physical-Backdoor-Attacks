@@ -1,15 +1,13 @@
 import torch
 import numpy as np
-import random
 import torch.nn as nn
 import copy
 
 from forest.utils import bypass_last_layer
-from sklearn import metrics
 from .data.datasets import PoisonSet, normalization
 from torch.utils.data import Subset
 from tqdm import tqdm
-from .consts import NON_BLOCKING, NORMALIZE
+from .consts import NORMALIZE
 from sklearn.decomposition import FastICA
 from sklearn.metrics import silhouette_score
 from .victims.models import get_model
@@ -23,8 +21,6 @@ def get_defense(defense):
         return _ActivationClustering
     elif defense == 'spectre':
         return _Spectre
-    elif defense == 'strip':
-        return _Strip
     elif defense== 'scan':
         return _Scan
     elif defense == 'ct':
@@ -193,76 +189,6 @@ def _ActivationClustering(kettle, victim, poison_delta, args, num_classes=10, cl
     
     clean_indices = list(set(range(len(kettle.trainset))) - set(suspicious_indices))
     return clean_indices
-    
-def _Strip(kettle, victim, poison_delta, args, num_classes=10):
-    strip_alpha = 1.0
-    N = 200
-    defense_fpr = 0.1
-    batch_size = 64
-    def check(_input, _label, source_set, model):
-        _list = []
-
-        samples = list(range(len(source_set)))
-        random.shuffle(samples)
-        samples = samples[:N]
-
-        with torch.no_grad():
-
-            for i in samples:
-                X, _, _ = source_set[i]
-                X = X.to(**kettle.setup)
-                _test = superimpose(_input, X)
-                entro = entropy(_test, model).cpu().detach()
-                _list.append(entro)
-                # _class = self.model.get_class(_test)
-
-        return torch.stack(_list).mean(0)
-
-    def superimpose(_input1, _input2, alpha = None):
-        if alpha is None:
-            alpha = strip_alpha
-
-        result = _input1 + alpha * _input2
-        return result
-
-    def entropy(_input, model) -> torch.Tensor:
-        # p = self.model.get_prob(_input)
-        p = torch.nn.Softmax(dim=1)(model(_input)) + 1e-8
-        return (-p * p.log()).sum(1)
-    
-    # choose a decision boundary with the test set
-    inspection_set = PoisonSet(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalization=NORMALIZE)
-    clean_entropy = []
-    clean_set_loader = torch.utils.data.DataLoader(kettle.validset, batch_size=batch_size, shuffle=False)
-    for _input, _label, _ in tqdm(clean_set_loader):
-        _input, _label = _input.to(**kettle.setup), _label.to(dtype=torch.long, device=kettle.setup['device'], non_blocking=NON_BLOCKING)
-        entropies = check(_input, _label, kettle.validset, victim.model)
-        for e in entropies:
-            clean_entropy.append(e)
-    clean_entropy = torch.FloatTensor(clean_entropy)
-
-    clean_entropy, _ = clean_entropy.sort()
-    
-    threshold_low = float(clean_entropy[int(defense_fpr * len(clean_entropy))])
-    threshold_high = np.inf
-
-    # now cleanse the inspection set with the chosen boundary
-    inspection_set_loader = torch.utils.data.DataLoader(inspection_set, batch_size=batch_size, shuffle=False)
-    all_entropy = []
-    for _input, _label, _ in tqdm(inspection_set_loader):
-        _input, _label = _input.to(**kettle.setup), _label.to(dtype=torch.long, device=kettle.setup['device'], non_blocking=NON_BLOCKING)
-        entropies = check(_input, _label, kettle.validset, victim.model)
-        for e in entropies:
-            all_entropy.append(e)
-    all_entropy = torch.FloatTensor(all_entropy)
-
-    suspicious_indices = torch.logical_or(all_entropy < threshold_low, all_entropy > threshold_high).nonzero().reshape(-1)
-    
-    clean_indices = list(set(range(len(kettle.trainset))) - set(suspicious_indices.tolist()))
-    return clean_indices
-
-def _NeuralCleanse(kettle, victim, poison_delta, args, num_classes=10):
-    pass
 
 def _CT(kettle, victim, poison_delta, args, num_classes=10):
     ct_detector = ConfusionTraining(kettle, victim, poison_delta, debug_info=True)
@@ -270,15 +196,14 @@ def _CT(kettle, victim, poison_delta, args, num_classes=10):
     return clean_indices
 
 def _Scan(kettle, victim, poison_delta, args, num_classes=10):
-    kwargs = {'num_workers': 3, 'pin_memory': True}
+    # Use single-worker DataLoader to avoid multiprocessing bugs
+    kwargs = {'num_workers': 0, 'pin_memory': True}
 
     inspection_set = PoisonSet(dataset=kettle.trainset, poison_delta=poison_delta, poison_lookup=kettle.poison_lookup, normalize=NORMALIZE)
-    # main dataset we aim to cleanse
     inspection_split_loader = torch.utils.data.DataLoader(
         inspection_set,
         batch_size=64, shuffle=False, **kwargs)
 
-    # a small clean batch for defensive purpose
     clean_set_loader = torch.utils.data.DataLoader(
         kettle.validset,
         batch_size=64, shuffle=True, **kwargs)
@@ -286,52 +211,60 @@ def _Scan(kettle, victim, poison_delta, args, num_classes=10):
     feats_inspection, class_indices_inspection = get_features(inspection_split_loader, victim.model)
     feats_clean, class_indices_clean = get_features(clean_set_loader, victim.model)
 
-    feats_inspection = np.array(feats_inspection)
-    class_indices_inspection = np.array(class_indices_inspection)
+    # feats_inspection = np.array(feats_inspection)
+    # class_indices_inspection = np.array(class_indices_inspection)
+    # feats_clean = np.array(feats_clean)
+    # class_indices_clean = np.array(class_indices_clean)
 
-    feats_clean = np.array(feats_clean)
-    class_indices_clean = np.array(class_indices_clean)
+    # # Debug: Check for empty, nan, inf
+    # for arr, name in [
+    #     (feats_inspection, "feats_inspection"),
+    #     (class_indices_inspection, "class_indices_inspection"),
+    #     (feats_clean, "feats_clean"),
+    #     (class_indices_clean, "class_indices_clean"),
+    # ]:
+    #     print(f"{name} shape={arr.shape}, nan={np.isnan(arr).any()}, inf={np.isinf(arr).any()}")
 
-    # For MobileNet-V2:
-    # from sklearn.decomposition import PCA
-    # projector = PCA(n_components=128)
-    # feats_inspection = projector.fit_transform(feats_inspection)
-    # feats_clean = projector.fit_transform(feats_clean)
+    # Initialize SCAn with CUDA support
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    scan = SCAn(device=device)
 
-    scan = SCAn()
-
-    # fit the clean distribution with the small clean split at hand
-    gb_model = scan.build_global_model(feats_clean, class_indices_clean, num_classes)
-
+    print("Building global model...")
+    # Convert features to numpy arrays for global model
+    feats_clean_np = np.array(feats_clean)
+    class_indices_clean_np = np.array(class_indices_clean)
+    gb_model = scan.build_global_model(feats_clean_np, class_indices_clean_np, num_classes)
+    
     size_inspection_set = len(feats_inspection)
 
-    feats_all = np.concatenate([feats_inspection, feats_clean])
-    class_indices_all = np.concatenate([class_indices_inspection, class_indices_clean])
-
-    # use the global model to divide samples
-    lc_model = scan.build_local_model(feats_all, class_indices_all, gb_model, num_classes)
+    # Convert features to numpy arrays first, then concatenate
+    feats_inspection_np = np.array(feats_inspection)
+    feats_clean_np = np.array(feats_clean)
+    class_indices_inspection_np = np.array(class_indices_inspection)
+    class_indices_clean_np = np.array(class_indices_clean)
     
-    # statistic test for the existence of "two clusters"
-    score = scan.calc_final_score(lc_model)
-    threshold = np.e
+    feats_all = np.concatenate([feats_inspection_np, feats_clean_np])
+    class_indices_all = np.concatenate([class_indices_inspection_np, class_indices_clean_np])
 
+    print("Building local model...")
+    lc_model = scan.build_local_model(feats_all, class_indices_all, gb_model, num_classes)
+    score = scan.calc_final_score(lc_model)
+    
+    threshold = np.e  # This seems weird, but I kept your original logic
+    print(f"Threshold for detection: {threshold}")
     suspicious_indices = []
 
     for target_class in range(num_classes):
-
-        print('[class-%d] outlier_score = %f' % (target_class, score[target_class]) )
-
-        if score[target_class] <= threshold: continue
+        print(f'[class-{target_class}] outlier_score = {score[target_class]:.6f}')
+        if score[target_class] <= threshold:
+            continue
 
         tar_label = (class_indices_all == target_class)
         all_label = np.arange(len(class_indices_all))
         tar = all_label[tar_label]
 
-        cluster_0_indices = []
-        cluster_1_indices = []
-
-        cluster_0_clean = []
-        cluster_1_clean = []
+        cluster_0_indices, cluster_1_indices = [], []
+        cluster_0_clean, cluster_1_clean = [], []
 
         for index, i in enumerate(lc_model['subg'][target_class]):
             if i == 1:
@@ -345,9 +278,8 @@ def _Scan(kettle, victim, poison_delta, args, num_classes=10):
                 else:
                     cluster_0_indices.append(tar[index])
 
-
-        # decide which cluster is the poison cluster, according to clean samples' distribution
-        if len(cluster_0_clean) < len(cluster_1_clean): # if most clean samples are in cluster 1
+        # decide which cluster is the poison cluster
+        if len(cluster_0_clean) < len(cluster_1_clean):
             suspicious_indices += cluster_0_indices
         else:
             suspicious_indices += cluster_1_indices
@@ -357,233 +289,418 @@ def _Scan(kettle, victim, poison_delta, args, num_classes=10):
 
 EPS = 1e-5
 class SCAn:
-    def __init__(self):
-        pass
+    def __init__(self, device=None):
+        if device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = device
+        print(f"SCAn initialized with device: {self.device}")
 
     def calc_final_score(self, lc_model=None):
         if lc_model is None:
             lc_model = self.lc_model
         sts = lc_model['sts']
         y = sts[:, 1]
-        ai = self.calc_anomaly_index(y / np.max(y))
-        return ai
+        # Add small epsilon to avoid division by zero
+        if isinstance(y, torch.Tensor):
+            max_y = torch.max(y)
+            max_y = max_y + 1e-8 if max_y == 0 else max_y
+            ai = self.calc_anomaly_index(y / max_y)
+            return ai.cpu().numpy() if isinstance(ai, torch.Tensor) else ai
+        else:
+            max_y = np.max(y)
+            max_y = max_y + 1e-8 if max_y == 0 else max_y
+            ai = self.calc_anomaly_index(y / max_y)
+            return ai
 
     def calc_anomaly_index(self, a):
-        ma = np.median(a)
-        b = abs(a - ma)
-        mm = np.median(b) * 1.4826
-        index = b / mm
-        return index
+        if isinstance(a, torch.Tensor):
+            ma = torch.median(a)
+            b = torch.abs(a - ma)
+            mm = torch.median(b) * 1.4826
+            # Add small epsilon to avoid division by zero
+            mm = mm + 1e-8 if mm == 0 else mm
+            index = b / mm
+            return index
+        else:
+            ma = np.median(a)
+            b = abs(a - ma)
+            mm = np.median(b) * 1.4826
+            # Add small epsilon to avoid division by zero
+            mm = mm + 1e-8 if mm == 0 else mm
+            index = b / mm
+            return index
 
     def build_global_model(self, reprs, labels, n_classes):
+        # Convert inputs to PyTorch tensors if they aren't already
+        if isinstance(reprs, np.ndarray):
+            reprs = torch.from_numpy(reprs).float()
+        elif isinstance(reprs, list):
+            reprs = torch.tensor(reprs).float()
+        else:
+            reprs = reprs.float()
+            
+        if isinstance(labels, np.ndarray):
+            labels = torch.from_numpy(labels).long()
+        elif isinstance(labels, list):
+            # Convert list to numpy first, handling scalar tensors and numpy scalars
+            labels_array = []
+            for label in labels:
+                if isinstance(label, torch.Tensor):
+                    labels_array.append(label.item())
+                elif isinstance(label, (np.ndarray, np.integer)):
+                    labels_array.append(int(label))
+                else:
+                    labels_array.append(int(label))
+            labels = torch.tensor(labels_array, dtype=torch.long)
+        else:
+            labels = labels.long()
+
         N = reprs.shape[0]  # num_samples
         M = reprs.shape[1]  # len_features
         L = n_classes
 
-        mean_a = np.mean(reprs, axis=0)
+        # Check if features are too large for GPU memory
+        # Estimate memory usage: roughly N*M*4 bytes for features + M*M*4 bytes for covariance
+        estimated_memory_gb = (N * M * 4 + M * M * 4) / (1024**3)
+        use_cpu = estimated_memory_gb > 10 or M > 10000  # Use CPU if > 10GB or features > 10k
+        
+        if use_cpu:
+            print(f"Using CPU for computation due to large feature size ({M}) or estimated memory usage ({estimated_memory_gb:.2f} GB)")
+            device = torch.device('cpu')
+        else:
+            device = self.device
+            
+        reprs = reprs.to(device)
+        labels = labels.to(device)
+
+        # Safety checks
+        if N == 0 or M == 0:
+            raise ValueError("Empty features array provided")
+        if torch.any(torch.isnan(reprs)) or torch.any(torch.isinf(reprs)):
+            print("Warning: NaN or Inf values detected in representations, replacing with zeros")
+            reprs = torch.nan_to_num(reprs, nan=0.0, posinf=0.0, neginf=0.0)
+
+        mean_a = torch.mean(reprs, dim=0)
         X = reprs - mean_a
 
-        cnt_L = np.zeros(L)
-        mean_f = np.zeros([L, M])
+        # Vectorized computation of class means
+        cnt_L = torch.zeros(L, device=device)
+        mean_f = torch.zeros(L, M, device=device)
+        
         for k in range(L):
             idx = (labels == k)
-            cnt_L[k] = np.sum(idx)
-            mean_f[k] = np.mean(X[idx], axis=0)
+            cnt_L[k] = torch.sum(idx.float())
+            if cnt_L[k] > 0:
+                mean_f[k] = torch.mean(X[idx], dim=0)
+            else:
+                mean_f[k] = torch.zeros(M, device=device)
 
-        u = np.zeros([N, M])
-        e = np.zeros([N, M])
-        for i in range(N):
-            k = labels[i]
-            u[i] = mean_f[k]  # class-mean
-            e[i] = X[i] - u[i]  # sample-variantion
-        Su = np.cov(np.transpose(u))
-        Se = np.cov(np.transpose(e))
+        # Vectorized computation of u and e
+        u = mean_f[labels]  # Broadcasting to get class means for each sample
+        e = X - u
 
-        # EM
+        # Compute covariance matrices using PyTorch with memory-efficient approach
+        try:
+            # Try computation first
+            Su = torch.cov(u.T)
+            Se = torch.cov(e.T)
+        except RuntimeError as e:
+            # If runs out of memory, try with double precision or CPU
+            print(f"Memory error during covariance computation: {e}")
+            print("Trying CPU computation...")
+            u_cpu = u.cpu()
+            e_cpu = e.cpu()
+            Su = torch.cov(u_cpu.T).to(device)
+            Se = torch.cov(e_cpu.T).to(device)
+
+        # Add regularization
+        reg_eye = torch.eye(M, device=device) * 1e-8
+        Su = Su + reg_eye
+        Se = Se + reg_eye
+
+        # EM iterations
         dist_Su = 1e5
         dist_Se = 1e5
         n_iters = 0
+        
         while (dist_Su + dist_Se > EPS) and (n_iters < 100):
             n_iters += 1
-            last_Su = Su
-            last_Se = Se
+            last_Su = Su.clone()
+            last_Se = Se.clone()
 
-            F = np.linalg.pinv(Se)
-            SuF = np.matmul(Su, F)
+            # Use more stable pseudo-inverse
+            F = torch.linalg.pinv(Se, rcond=1e-8)
+            SuF = torch.mm(Su, F)
 
-            G_set = list()
+            # Precompute G matrices for all classes
+            G_set = []
             for k in range(L):
-                G = -np.linalg.pinv(cnt_L[k] * Su + Se)
-                G = np.matmul(G, SuF)
+                matrix_to_invert = cnt_L[k] * Su + Se + reg_eye
+                G = -torch.linalg.pinv(matrix_to_invert, rcond=1e-8)
+                G = torch.mm(G, SuF)
                 G_set.append(G)
 
-            u_m = np.zeros([L, M])
-            e = np.zeros([N, M])
-            u = np.zeros([N, M])
-
+            # Vectorized update of u_m
+            u_m = torch.zeros(L, M, device=device)
             for i in range(N):
                 vec = X[i]
-                k = labels[i]
+                k = labels[i].item()
                 G = G_set[k]
-                dd = np.matmul(np.matmul(Se, G), np.transpose(vec))
-                u_m[k] = u_m[k] - np.transpose(dd)
+                dd = torch.mm(torch.mm(Se, G), vec.unsqueeze(1))
+                u_m[k] = u_m[k] - dd.squeeze()
 
-            for i in range(N):
-                vec = X[i]
-                k = labels[i]
-                e[i] = vec - u_m[k]
-                u[i] = u_m[k]
+            # Update e and u
+            u = u_m[labels]
+            e = X - u
 
-            # max-step
-            Su = np.cov(np.transpose(u))
-            Se = np.cov(np.transpose(e))
+            # Recompute covariance matrices with memory-efficient approach
+            try:
+                Su = torch.cov(u.T) + reg_eye
+                Se = torch.cov(e.T) + reg_eye
+            except RuntimeError:
+                # Fallback to CPU if runs out of memory
+                u_cpu = u.cpu()
+                e_cpu = e.cpu()
+                Su = torch.cov(u_cpu.T).to(device) + reg_eye
+                Se = torch.cov(e_cpu.T).to(device) + reg_eye
 
+            # Compute convergence criteria
             dif_Su = Su - last_Su
             dif_Se = Se - last_Se
 
-            dist_Su = np.linalg.norm(dif_Su)
-            dist_Se = np.linalg.norm(dif_Se)
-            # print(dist_Su,dist_Se)
+            dist_Su = torch.norm(dif_Su).item()
+            dist_Se = torch.norm(dif_Se).item()
 
+        # Convert back to numpy for compatibility with existing code
         gb_model = dict()
-        gb_model['Su'] = Su
-        gb_model['Se'] = Se
-        gb_model['mean'] = mean_f
+        gb_model['Su'] = Su.cpu().numpy()
+        gb_model['Se'] = Se.cpu().numpy()
+        gb_model['mean'] = mean_f.cpu().numpy()
         self.gb_model = gb_model
         return gb_model
 
     def build_local_model(self, reprs, labels, gb_model, n_classes):
-        Su = gb_model['Su']
-        Se = gb_model['Se']
+        # Convert inputs to PyTorch tensors first without moving to GPU yet
+        if isinstance(reprs, np.ndarray):
+            reprs = torch.from_numpy(reprs).float()
+        elif isinstance(reprs, list):
+            reprs = torch.tensor(reprs).float()
+        else:
+            reprs = reprs.float()
+            
+        if isinstance(labels, np.ndarray):
+            labels = torch.from_numpy(labels).long()
+        elif isinstance(labels, list):
+            # Convert list to numpy first, handling scalar tensors and numpy scalars
+            labels_array = []
+            for label in labels:
+                if isinstance(label, torch.Tensor):
+                    labels_array.append(label.item())
+                elif isinstance(label, (np.ndarray, np.integer)):
+                    labels_array.append(int(label))
+                else:
+                    labels_array.append(int(label))
+            labels = torch.tensor(labels_array, dtype=torch.long)
+        else:
+            labels = labels.long()
 
-        F = np.linalg.pinv(Se)
         N = reprs.shape[0]
         M = reprs.shape[1]
         L = n_classes
 
-        mean_a = np.mean(reprs, axis=0)
+        # Check if features are too large for GPU memory
+        estimated_memory_gb = (N * M * 4 + M * M * 4) / (1024**3)
+        use_cpu = estimated_memory_gb > 10 or M > 10000
+        
+        if use_cpu:
+            print(f"Using CPU for local model due to large feature size ({M}) or estimated memory usage ({estimated_memory_gb:.2f} GB)")
+            device = torch.device('cpu')
+        else:
+            device = self.device
+
+        # Convert global model matrices to appropriate device
+        if isinstance(gb_model['Su'], np.ndarray):
+            Su = torch.from_numpy(gb_model['Su']).float().to(device)
+        else:
+            Su = gb_model['Su'].to(device)
+            
+        if isinstance(gb_model['Se'], np.ndarray):
+            Se = torch.from_numpy(gb_model['Se']).float().to(device)
+        else:
+            Se = gb_model['Se'].to(device)
+
+        # Move data to device
+        reprs = reprs.to(device)
+        labels = labels.to(device)
+
+        F = torch.linalg.pinv(Se, rcond=1e-8)
+        N = reprs.shape[0]
+        M = reprs.shape[1]
+        L = n_classes
+
+        mean_a = torch.mean(reprs, dim=0)
         X = reprs - mean_a
 
-        class_score = np.zeros([L, 3])
-        u1 = np.zeros([L, M])
-        u2 = np.zeros([L, M])
-        split_rst = list()
+        class_score = torch.zeros(L, 3, device=device)
+        u1 = torch.zeros(L, M, device=device)
+        u2 = torch.zeros(L, M, device=device)
+        split_rst = []
 
         for k in range(L):
             selected_idx = (labels == k)
             cX = X[selected_idx]
-            subg, i_u1, i_u2 = self.find_split(cX, F)
-            # print("subg",subg)
+            
+            if cX.shape[0] == 0:  # Handle empty classes
+                subg = torch.tensor([], device=device)
+                i_u1 = torch.zeros(M, device=device)
+                i_u2 = torch.zeros(M, device=device)
+                i_sc = torch.tensor(0.0, device=device)
+            else:
+                subg, i_u1, i_u2 = self.find_split(cX, F, device)
+                i_sc = self.calc_test(cX, Su, Se, F, subg, i_u1, i_u2, device)
 
-            i_sc = self.calc_test(cX, Su, Se, F, subg, i_u1, i_u2)
-            split_rst.append(subg)
+            split_rst.append(subg.cpu().numpy())
             u1[k] = i_u1
             u2[k] = i_u2
-            class_score[k] = [k, i_sc.squeeze(), np.sum(selected_idx)]
+            class_score[k] = torch.tensor([k, i_sc.item(), torch.sum(selected_idx.float()).item()], device=device)
 
         lc_model = dict()
-        lc_model['sts'] = class_score
-        lc_model['mu1'] = u1
-        lc_model['mu2'] = u2
+        lc_model['sts'] = class_score.cpu().numpy()
+        lc_model['mu1'] = u1.cpu().numpy()
+        lc_model['mu2'] = u2.cpu().numpy()
         lc_model['subg'] = split_rst
 
         self.lc_model = lc_model
         return lc_model
 
-    def find_split(self, X, F):
+    def find_split(self, X, F, device=None):
+        if device is None:
+            device = self.device
         N = X.shape[0]
         M = X.shape[1]
-        subg = np.random.rand(N)
+        
+        # Safety check for empty input
+        if N == 0:
+            return (torch.tensor([], device=device), 
+                   torch.zeros(M, device=device), 
+                   torch.zeros(M, device=device))
+            
+        subg = torch.rand(N, device=device)
 
-        if (N == 1):
+        if N == 1:
             subg[0] = 0
-            return (subg, X.copy(), X.copy())
+            return (subg, X.clone(), X.clone())
 
-        if np.sum(subg >= 0.5) == 0:
+        # Ensure both clusters have at least one point initially
+        if torch.sum(subg >= 0.5) == 0:
             subg[0] = 1
-        if np.sum(subg < 0.5) == 0:
+        if torch.sum(subg < 0.5) == 0:
             subg[0] = 0
-        last_z1 = -np.ones(N)
+        
+        last_z1 = -torch.ones(N, device=device)
 
-        # EM
+        # EM iterations
         steps = 0
-        while (np.linalg.norm(subg - last_z1) > EPS) and (np.linalg.norm((1 - subg) - last_z1) > EPS) and (steps < 100):
+        eps_tensor = torch.tensor(EPS, device=device)
+        
+        while (torch.norm(subg - last_z1) > eps_tensor) and \
+              (torch.norm((1 - subg) - last_z1) > eps_tensor) and \
+              (steps < 100):
             steps += 1
-            last_z1 = subg.copy()
+            last_z1 = subg.clone()
 
-            # max-step
-            # calc u1 and u2
+            # max-step: calc u1 and u2
             idx1 = (subg >= 0.5)
             idx2 = (subg < 0.5)
-            if (np.sum(idx1) == 0) or (np.sum(idx2) == 0):
+            
+            if torch.sum(idx1) == 0 or torch.sum(idx2) == 0:
                 break
-            if np.sum(idx1) == 1:
-                u1 = X[idx1]
+                
+            if torch.sum(idx1) == 1:
+                u1 = X[idx1].squeeze(0)
             else:
-                u1 = np.mean(X[idx1], axis=0)
-            if np.sum(idx2) == 1:
-                u2 = X[idx2]
+                u1 = torch.mean(X[idx1], dim=0)
+                
+            if torch.sum(idx2) == 1:
+                u2 = X[idx2].squeeze(0)
             else:
-                u2 = np.mean(X[idx2], axis=0)
+                u2 = torch.mean(X[idx2], dim=0)
 
-            bias = np.matmul(np.matmul(u1, F), np.transpose(u1)) - np.matmul(np.matmul(u2, F), np.transpose(u2))
-            e2 = u1 - u2  # (64,1)
-            for i in range(N):
-                e1 = X[i]
-                delta = np.matmul(np.matmul(e1, F), np.transpose(e2))
-                if bias - 2 * delta < 0:
-                    subg[i] = 1
-                else:
-                    subg[i] = 0
+            # Vectorized computation of bias and deltas
+            bias = torch.mm(torch.mm(u1.unsqueeze(0), F), u1.unsqueeze(1)) - \
+                   torch.mm(torch.mm(u2.unsqueeze(0), F), u2.unsqueeze(1))
+            bias = bias.squeeze()
+            
+            e2 = u1 - u2
+            deltas = torch.mm(torch.mm(X, F), e2.unsqueeze(1)).squeeze()
+            
+            # Update subg using vectorized operations
+            subg = (bias - 2 * deltas < 0).float()
 
         return (subg, u1, u2)
 
-    def calc_test(self, X, Su, Se, F, subg, u1, u2):
+    def calc_test(self, X, Su, Se, F, subg, u1, u2, device=None):
+        if device is None:
+            device = self.device
         N = X.shape[0]
         M = X.shape[1]
 
-        G = -np.linalg.pinv(N * Su + Se)
-        mu = np.zeros([1, M])
-        SeG = np.matmul(Se,G)
+        # Add regularization to avoid singular matrices
+        reg_eye = torch.eye(Se.shape[0], device=device) * 1e-8
+        matrix_to_invert = N * Su + Se + reg_eye
+        G = -torch.linalg.pinv(matrix_to_invert, rcond=1e-8)
+        
+        mu = torch.zeros(1, M, device=device)
+        SeG = torch.mm(Se, G)
+        
+        # Vectorized computation of mu
         for i in range(N):
             vec = X[i]
-            dd = np.matmul(SeG, np.transpose(vec))
-            mu = mu - dd
+            dd = torch.mm(SeG, vec.unsqueeze(1))
+            mu = mu - dd.T
 
-        b1 = np.matmul(np.matmul(mu, F), np.transpose(mu)) - np.matmul(np.matmul(u1, F), np.transpose(u1))
-        b2 = np.matmul(np.matmul(mu, F), np.transpose(mu)) - np.matmul(np.matmul(u2, F), np.transpose(u2))
-        n1 = np.sum(subg >= 0.5)
+        # Compute bias terms
+        b1 = torch.mm(torch.mm(mu, F), mu.T) - torch.mm(torch.mm(u1.unsqueeze(0), F), u1.unsqueeze(1))
+        b2 = torch.mm(torch.mm(mu, F), mu.T) - torch.mm(torch.mm(u2.unsqueeze(0), F), u2.unsqueeze(1))
+        
+        n1 = torch.sum(subg >= 0.5).float()
         n2 = N - n1
         sc = n1 * b1 + n2 * b2
 
+        # Vectorized computation of the correction term
         for i in range(N):
             e1 = X[i]
             if subg[i] >= 0.5:
-                e2 = mu - u1
+                e2 = mu.squeeze() - u1
             else:
-                e2 = mu - u2
-            sc -= 2 * np.matmul(np.matmul(e1, F), np.transpose(e2))
+                e2 = mu.squeeze() - u2
+            sc -= 2 * torch.mm(torch.mm(e1.unsqueeze(0), F), e2.unsqueeze(1))
 
         return sc / N
 
 def get_features(data_loader, model):
-
-    class_indices = []
-    feats = []
+    class_indices, feats = [], []
 
     layer_cake = list(model.children())
     feature_extractor = torch.nn.Sequential(*(layer_cake[:-1]), torch.nn.Flatten())
     feature_extractor.eval()
+    model_device = next(model.parameters()).device
+    feature_extractor = feature_extractor.to(model_device)
     with torch.no_grad():
-        for i, (ins_data, ins_target, _) in enumerate(tqdm(data_loader)):
-            ins_data = ins_data.cuda()
+        for i, batch in enumerate(data_loader):
+            # Support both 2 or 3 returned items
+            if len(batch) == 3:
+                ins_data, ins_target, _ = batch
+            elif len(batch) == 2:
+                ins_data, ins_target = batch
+            else:
+                raise RuntimeError(f"Unexpected batch format: {type(batch)}, len={len(batch)}")
+            ins_data = ins_data.to(model_device)
             x_features = feature_extractor(ins_data)
-
-            this_batch_size = len(ins_target)
-            for bid in range(this_batch_size):
+            for bid in range(ins_target.size(0)):
                 feats.append(x_features[bid].cpu().numpy())
                 class_indices.append(ins_target[bid].cpu().numpy())
-
     return feats, class_indices
 
 def _Spectre(kettle, victim, poison_delta, args, num_classes=10):
@@ -601,17 +718,19 @@ def _Spectre(kettle, victim, poison_delta, args, num_classes=10):
     max_dim = 2 # 64
     class_taus = []
     class_S = []
+    # Determine device from model
+    device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu')
     for i in range(num_classes):
 
         if len(class_indices[i]) > 1:
 
             # feats for class i in poisoned set
             temp_feats = np.array([feats[temp_idx].squeeze(0).cpu().numpy() for temp_idx in class_indices[i]])
-            temp_feats = torch.FloatTensor(temp_feats).cuda()
+            temp_feats = torch.FloatTensor(temp_feats).to(device)
 
             temp_clean_feats = None
             temp_clean_feats = np.array([clean_feats[temp_idx].squeeze(0).cpu().numpy() for temp_idx in clean_class_indices[i]])
-            temp_clean_feats = torch.FloatTensor(temp_clean_feats).cuda()
+            temp_clean_feats = torch.FloatTensor(temp_clean_feats).to(device)
             temp_clean_feats = temp_clean_feats - temp_feats.mean(dim=0)
             temp_clean_feats = temp_clean_feats.T
 
@@ -659,6 +778,10 @@ def _Spectre(kettle, victim, poison_delta, args, num_classes=10):
                 suspicious_indices.append(class_indices[i][temp_index])
 
             class_S.append(suspicious_indices)
+        else:
+            # Handle classes with <= 1 sample
+            class_taus.append(0.0)  # Default tau value for classes with insufficient samples
+            class_S.append([])  # Empty list for classes with insufficient samples
 
     class_taus = np.array(class_taus)
     median_tau = np.median(class_taus)
@@ -683,7 +806,7 @@ def QUEscore(temp_feats, n_dim):
     n_samples = temp_feats.shape[1]
     alpha = 4.0
     Sigma = torch.matmul(temp_feats, temp_feats.T) / n_samples
-    I = torch.eye(n_dim).cuda()
+    I = torch.eye(n_dim).to(temp_feats.device)
     Q = torch.exp((alpha * (Sigma - I)) / (torch.linalg.norm(Sigma, ord=2) - 1))
     trace_Q = torch.trace(Q)
 
@@ -704,8 +827,8 @@ def SPECTRE(U, temp_feats, n_dim, budget, oracle_clean_feats=None):
 
     if oracle_clean_feats is None:
         estimator = BeingRobust(random_state=0, keep_filtered=True).fit((temp_feats.T).cpu().numpy())
-        clean_mean = torch.FloatTensor(estimator.location_).cuda()
-        filtered_feats = (torch.FloatTensor(estimator.filtered_).cuda() - clean_mean).T
+        clean_mean = torch.FloatTensor(estimator.location_).to(temp_feats.device)
+        filtered_feats = (torch.FloatTensor(estimator.filtered_).to(temp_feats.device) - clean_mean).T
         clean_covariance = torch.cov(filtered_feats)
     else:
         clean_feats = torch.matmul(projector, oracle_clean_feats)
@@ -931,12 +1054,27 @@ class ConfusionTraining:
     def __init__(self, kettle, victim, poison_delta, debug_info=False, defense_ratio=0.2):
         self.kettle = kettle
 
-        # Make sure all models are moved to the same device (cuda:0) first
-        self.base_model = victim.model.to('cuda:0')  # Explicitly move to cuda:0
-        self.pretrained_model = get_model(kettle.args.net[0], num_classes=kettle.num_classes, pretrained=True).to('cuda:0')
+        # Ensure all models are on cuda:0 before DataParallel wrapping
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+        else:
+            device = torch.device('cpu')
+        
+        # Move victim model to the primary device and ensure all parameters are there
+        self.base_model = victim.model
+        if hasattr(self.base_model, 'module'):  # If already wrapped in DataParallel
+            self.base_model = self.base_model.module  # Extract the underlying model
+        self.base_model = self.base_model.to(device)
+        
+        # Create pretrained model and move to primary device
+        self.pretrained_model = get_model(kettle.args.net[0], num_classes=kettle.num_classes, pretrained=True)
+        self.pretrained_model = self.pretrained_model.to(device)
+        
+        # Create confused model as a copy of pretrained model
         self.confused_model = copy.deepcopy(self.pretrained_model)
+        self.confused_model = self.confused_model.to(device)
 
-        # DataParallel will handle moving the replicas to other devices
+        # Only wrap with DataParallel if multiple GPUs are available
         if torch.cuda.device_count() > 1:
             self.base_model = nn.DataParallel(self.base_model)
             self.pretrained_model = nn.DataParallel(self.pretrained_model)
@@ -1005,8 +1143,8 @@ class ConfusionTraining:
             freq_of_each_class = nums_of_each_class / size_of_distilled_set
             freq_of_each_class = np.sqrt(freq_of_each_class + 0.001)
 
-            pretrain_epochs = 8
-            pretrain_lr = 0.01
+            pretrain_epochs = 10
+            pretrain_lr = 0.001
             distillation_iters = 100
 
             if confusion_iter == num_confusion_iter - 1:
@@ -1053,7 +1191,25 @@ class ConfusionTraining:
             )
             
             # confusion_training
-            self.confused_model = copy.deepcopy(self.pretrained_model)
+            # Create confused model with proper device handling
+            if hasattr(self.pretrained_model, 'module'):
+                # If wrapped in DataParallel, extract the underlying model first
+                base_pretrained = self.pretrained_model.module
+            else:
+                base_pretrained = self.pretrained_model
+            
+            self.confused_model = copy.deepcopy(base_pretrained)
+            
+            # Ensure confused model is on the correct device
+            if torch.cuda.is_available():
+                device = torch.device('cuda:0')
+            else:
+                device = torch.device('cpu')
+            self.confused_model = self.confused_model.to(device)
+            
+            # Wrap with DataParallel if multiple GPUs are available
+            if torch.cuda.device_count() > 1:
+                self.confused_model = nn.DataParallel(self.confused_model)
             model = self.confusion_train(confusion_iter=confusion_iter, base_model=self.base_model, 
                                          confused_model=self.confused_model, 
                                          distilled_set_loader=distilled_set_loader, 
@@ -1102,7 +1258,14 @@ class ConfusionTraining:
 
             for batch_idx, (data, target, idxs) in enumerate( tqdm(distilled_set_loader) ):
                 optimizer.zero_grad()
-                data, target = data.cuda(), target.cuda()  # train set batch
+                
+                # Get device from the model
+                if hasattr(pretrain_model, 'module'):
+                    model_device = next(pretrain_model.module.parameters()).device
+                else:
+                    model_device = next(pretrain_model.parameters()).device
+                
+                data, target = data.to(model_device), target.to(model_device)  # train set batch
                 output = pretrain_model(data)
                 loss = criterion(output, target)
                 loss.backward()
@@ -1156,7 +1319,13 @@ class ConfusionTraining:
                 clean_set_iters = iter(clean_set_loader)
                 data_shift, target_shift, idxs = next(clean_set_iters)
 
-            data_shift, target_shift = data_shift.cuda(), target_shift.cuda()
+            # Get the device from the model
+            if hasattr(base_model, 'module'):
+                model_device = next(base_model.module.parameters()).device
+            else:
+                model_device = next(base_model.parameters()).device
+            
+            data_shift, target_shift = data_shift.to(model_device), target_shift.to(model_device)
 
             with torch.no_grad():
                 preds = torch.argmax(base_model(data_shift), dim=1).detach()
@@ -1174,7 +1343,7 @@ class ConfusionTraining:
                     distilled_set_iters = iter(distilled_set_loader)
                     data, target, idxs = next(distilled_set_iters)
 
-                data, target = data.cuda(), target.cuda()
+                data, target = data.to(model_device), target.to(model_device)
                 data_mix = torch.cat([data_shift, data], dim=0)
                 target_mix = torch.cat([target_confusion, target], dim=0)
                 boundary = data_shift.shape[0]
@@ -1257,7 +1426,8 @@ class ConfusionTraining:
         with torch.no_grad():
 
             for data, target, idxs in tqdm(inspection_set_loader):
-                data, target = data.cuda(), target.cuda()
+                device = next(confused_model.parameters()).device
+                data, target = data.to(device), target.to(device)
                 output = confused_model(data)
 
                 preds = torch.argmax(output, dim=1)
@@ -1412,7 +1582,13 @@ class ConfusionTraining:
 
             for i, (ins_data, ins_target, _) in enumerate(tqdm(data_loader)):
 
-                ins_data, ins_target = ins_data.cuda(), ins_target.cuda()
+                # Get device from the model
+                if hasattr(model, 'module'):
+                    model_device = next(model.module.parameters()).device
+                else:
+                    model_device = next(model.parameters()).device
+                
+                ins_data, ins_target = ins_data.to(model_device), ins_target.to(model_device)
                 x_features = headless_model(ins_data)
                 output = last_layer(x_features)
 
@@ -1510,7 +1686,11 @@ class ConfusionTraining:
             print('start_pca..')
 
             temp_feats = torch.FloatTensor(
-                feats_inspection[class_indices[target_class]]).cuda()
+                feats_inspection[class_indices[target_class]])
+            
+            # Determine device - use CPU for PCA operations as it's more stable
+            device = torch.device('cpu')
+            temp_feats = temp_feats.to(device)
 
 
             # reduce dimensionality
@@ -1606,8 +1786,15 @@ def eval_model(model, kettle):
     model.eval()
     clean_acc, asr = 0, 0
     corrects = 0
+    
+    # Get device from model
+    if hasattr(model, 'module'):
+        device = next(model.module.parameters()).device
+    else:
+        device = next(model.parameters()).device
+    
     for batch_idx, (data, target, idxs) in enumerate(tqdm(kettle.validloader)):
-        data, target = data.to('cuda:0'), target.to('cuda:0')
+        data, target = data.to(device), target.to(device)
         output = model(data)
         pred = output.argmax(dim=1)
         corrects += torch.eq(pred, target).sum().item()
@@ -1618,7 +1805,7 @@ def eval_model(model, kettle):
 
     corrects = 0
     for batch_idx, (data, _, _) in enumerate(tqdm(kettle.source_testloader[source_class])):
-        data = data.to('cuda:0')
+        data = data.to(device)
         output = model(data)
         pred = output.argmax(dim=1)
         corrects += torch.eq(pred, target_class).sum().item()

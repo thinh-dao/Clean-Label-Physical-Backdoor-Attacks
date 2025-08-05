@@ -74,8 +74,8 @@ class Cutout(torch.nn.Module):
         W = size[2]
         H = size[3]
         cut_rat = np.sqrt(1. - lmb)
-        cut_w = np.int(W * cut_rat)
-        cut_h = np.int(H * cut_rat)
+        cut_w = np.int32(W * cut_rat)
+        cut_h = np.int32(H * cut_rat)
         # uniform
         cx = np.random.randint(W)
         cy = np.random.randint(H)

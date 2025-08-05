@@ -100,6 +100,7 @@ def options():
     parser.add_argument('--validate_every', default=10, type=int, help='How often to to validate the model during training.')
     parser.add_argument('--train_max_epoch', default=40, type=int, help='Train only up to this epoch before poisoning.')
     parser.add_argument('--clean_training_only', default=False, action='store_true', help='Only train the clean data')
+    parser.add_argument('--save_poison_only', default=False, action='store_true', help='Only save the poison without validating the model')
 
     # Use only a subset of the dataset:
     parser.add_argument('--ablation', default=1.0, type=float, help='What percent of data (including poisons) to use for validation')
@@ -185,6 +186,7 @@ def options():
 
     # Denoising and noising
     parser.add_argument("--denoise", action='store_true')
+    parser.add_argument("--denoise_method", default='non-local-means')
     parser.add_argument("--gaussian_noise", action='store_true')
 
     return parser

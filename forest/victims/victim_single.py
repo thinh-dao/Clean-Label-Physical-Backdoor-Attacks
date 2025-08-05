@@ -10,7 +10,7 @@ from math import ceil
 from .models import get_model
 from .training import get_optimizers, run_step
 from ..hyperparameters import training_strategy
-from ..utils import set_random_seed, write, OpenCVNonLocalMeansDenoiser
+from ..utils import set_random_seed, write, OpenCVNonLocalMeansDenoiser, gauss_smooth
 from ..consts import BENCHMARK, SHARING_STRATEGY, NORMALIZE
 from ..data.datasets import normalization
 
@@ -151,8 +151,12 @@ class _VictimSingle(_VictimBase):
         single_setup = (self.model, self.defs, self.optimizer, self.scheduler)
         self.defs.epochs = 1 if self.args.dryrun else max_epoch
 
-        if self.args.denoise:
-            denoiser = OpenCVNonLocalMeansDenoiser(h=10, h_color=10)
+        if self.args.denoise and poison_delta is not None:
+            if self.args.denoise_method == 'non_local_means':
+                write('Using OpenCV Non-Local Means denoiser.', self.args.output)
+                denoiser = OpenCVNonLocalMeansDenoiser(h=10, h_color=10)
+            else:
+                denoiser = gauss_smooth
 
             tensors = []
             labels = []
@@ -165,8 +169,6 @@ class _VictimSingle(_VictimBase):
                     tensor += poison_delta[lookup, :, :, :]
 
                 tensor = denoiser(tensor)
-                if NORMALIZE:
-                    tensor = normalization(tensor)
 
                 tensors.append(tensor)
                 labels.append(label)

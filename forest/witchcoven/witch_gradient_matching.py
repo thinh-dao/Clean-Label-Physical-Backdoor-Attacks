@@ -5,7 +5,7 @@ import numpy as np
 import random
 
 from ..consts import BENCHMARK, NON_BLOCKING, NORMALIZE, FINETUNING_LR_DROP
-from ..utils import bypass_last_layer, cw_loss, write
+from ..utils import bypass_last_layer, cw_loss, write, GaussianNoise, gauss_smooth
 from ..victims.training import _split_data
 from .witch_base import _Witch
 from forest.data.datasets import normalization
@@ -173,6 +173,16 @@ class WitchGradientMatching(_Witch):
         
         self._initialize_sources(victim, kettle)
         
+        if self.args.gaussian_noise:
+            self.noiser = GaussianNoise()
+        else:
+            self.noiser = None
+        
+        if self.args.denoise and self.args.denoise_method == 'gaussian':
+            self.denoiser = gauss_smooth
+        else:
+            self.denoiser = None
+            
         if self.args.sample_from_trajectory:             
             if not self.args.skip_clean_training:
                 victim.initialize()
@@ -348,7 +358,7 @@ class WitchGradientMatching(_Witch):
         inputs, labels, ids = example
         # Check adversarial pattern ids
         poison_slices, batch_positions = kettle.lookup_poison_indices(ids)
-            
+        
         # If a poisoned id position is found, the corresponding pattern is added here:
         if len(batch_positions) > 0:
             inputs = inputs.to(**self.setup)
@@ -381,6 +391,12 @@ class WitchGradientMatching(_Witch):
             if self.args.paugment:
                 inputs = kettle.augment(inputs)
 
+            if self.noiser is not None:
+                inputs = self.noiser(inputs)
+            
+            if self.denoiser is not None:
+                inputs = self.denoiser(inputs)
+                
             # Perform mixing
             if self.args.pmix:
                 inputs, extra_labels, mixing_lmb = kettle.mixer(inputs, labels)
@@ -577,9 +593,9 @@ class WitchGradientMatchingHidden(WitchGradientMatching):
     This class does a ton of horrid overwriting of the _batched_step method to add some additional
     computations that I dont want to be executed for all attacks. todo: refactor :>
     """
-    FEATURE_WEIGHT = 1.0
+    FEATURE_WEIGHT = 0.1
 
-    def _batched_step(self, poison_delta, poison_bounds, example, victim, kettle, curr_reg=0):
+    def _batched_step(self, poison_delta, poison_bounds, example, victim, kettle, source_grad, source_gnorm, source_clean_grad):
         """Take a step toward minmizing the current poison loss."""
         inputs, labels, ids = example
 
@@ -650,17 +666,12 @@ class WitchGradientMatchingHidden(WitchGradientMatching):
                     return loss
             else:
                 criterion = loss_fn
-
-            if self.target_feature != None:
-                feat_loss = self.get_featloss(inputs)
-            else:
-                feat_loss = torch.tensor(0)
                 
             if NORMALIZE:
                 inputs = normalization(inputs)
                 
             closure = self._define_objective(inputs, clean_inputs, labels, criterion)
-            loss, prediction = victim.compute(closure, self.source_grad, self.source_clean_grad, self.source_gnorm)
+            loss, prediction = victim.compute(closure, source_grad, source_clean_grad, source_gnorm)
 
             # Update Step
             if self.args.attackoptim in ['PGD', 'GD']:
@@ -676,7 +687,7 @@ class WitchGradientMatchingHidden(WitchGradientMatching):
         else:
             loss, prediction = torch.tensor(0), torch.tensor(0)
 
-        return loss.item(), feat_loss.item(), prediction.item()
+        return loss.item(), prediction.item()
 
 
     def _define_objective(self, inputs, clean_inputs, labels, criterion):

@@ -97,7 +97,10 @@ if __name__ == "__main__":
     # Export
     if args.save_poison is not None and args.recipe != 'naive' and 'dirty-label' not in args.recipe:
         data.export_poison(poison_delta, model, path=args.poison_path, mode=args.save_poison)
-        
+        if args.save_poison_only:
+            write('Poison saved, exiting without validating the model.', args.output)
+            exit(0)
+    
     write('Validating poisoned model...', args.output)
 
     # Validation
