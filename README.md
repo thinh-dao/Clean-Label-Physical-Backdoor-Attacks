@@ -1,6 +1,8 @@
 # Clean-Label Physical Backdoor Attacks With Dataset Distillation 
 
-This code is the official PyTroch implementation of our paper: Clean-Label Physical Backdoor Attacks With Dataset Distillation. The code is built based on the framework from [Industrial Scale Data Poisoning via Gradient Matching](https://github.com/JonasGeiping/poisoning-gradient-matching) and [Sleeper Agent](https://github.com/hsouri/Sleeper-Agent.git)
+This code is the official PyTroch implementation of our paper: [Clean-Label Physical Backdoor Attacks With Dataset Distillation](https://arxiv.org/abs/2407.19203). 
+
+The code is built based on the framework from [Industrial Scale Data Poisoning via Gradient Matching](https://github.com/JonasGeiping/poisoning-gradient-matching) and [Sleeper Agent](https://github.com/hsouri/Sleeper-Agent.git)
 
 To use this codebase, you have to first download the dataset of Animal classification in this link: https://drive.google.com/file/d/1E97dY5bm3xgAfwIydVxfCuHYR7AGXKw1/view?usp=drive_link and unzip.
 
